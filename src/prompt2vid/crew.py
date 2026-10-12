@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import yaml
 from crewai import Agent, Crew, Process, Task
@@ -38,6 +39,34 @@ TASK_ORDER: list[str] = [
     "inspect_quality",
     "publish_douyin",
 ]
+
+
+def _bypass_proxy_for_internal_hosts() -> None:
+    """把内网服务地址加入 NO_PROXY，避免公司代理劫持内网请求。
+
+    httpx/aiohttp 等库默认读取 HTTP_PROXY/HTTPS_PROXY 环境变量；公司
+    代理（SWG）会拦截发往内网 LLM 网关的请求并返回 403 拦截页。
+    把 PROMPT2VID_LLM_BASE_URL / COMFYUI_URL 的主机名追加到
+    NO_PROXY / no_proxy 即可让这些请求直连。
+    """
+    hosts: set[str] = set()
+    for var in ("PROMPT2VID_LLM_BASE_URL", "COMFYUI_URL"):
+        raw = os.getenv(var, "").strip()
+        if not raw:
+            continue
+        parsed = urlparse(raw if "://" in raw else f"http://{raw}")
+        host = parsed.hostname
+        if host:
+            hosts.add(host)
+
+    if not hosts:
+        return
+
+    for var in ("NO_PROXY", "no_proxy"):
+        current = os.getenv(var, "")
+        parts = [p.strip() for p in current.split(",") if p.strip()]
+        merged = ",".join(dict.fromkeys(parts + sorted(hosts)))
+        os.environ[var] = merged
 
 
 def _find_config_dir() -> Path:
@@ -130,6 +159,7 @@ def build_tasks(config_dir: Path, agents: dict[str, Agent]) -> list[Task]:
 def build_crew() -> Crew:
     """构建完整流水线 Crew。"""
     load_dotenv()
+    _bypass_proxy_for_internal_hosts()
     config_dir = _find_config_dir()
     agents = build_agents(config_dir)
     tasks = build_tasks(config_dir, agents)
