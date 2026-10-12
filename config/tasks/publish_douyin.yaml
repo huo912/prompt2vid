@@ -1,0 +1,18 @@
+publish_douyin:
+  description: >-
+    将通过质检的成片发布到抖音。
+    前置检查：读取 report/quality_report.json，仅当 passed=true 才继续，
+    否则如实报告"质检未通过，不发布"并结束。
+    发布流程：
+    1. 根据需求与剧本撰写抖音标题（≤ 30 字）与 3-5 个话题标签（#开头）；
+    2. 调用抖音发布工具（publish）：传入 final/final.mp4 路径、标题、标签；
+       工具在 DOUYIN_DRY_RUN=true 时仅记录状态不真实上传；
+    3. 将发布结果写入 .douyin/state.json（工具自动完成）。
+    在最终回答中给出发布结果 JSON：
+    {"status": "published" 或 "dry_run" 或 "skipped", "title": "...",
+     "item_id": "..." 或 null, "published_at": "ISO 时间"}
+    要求：发布结果必须来自工具真实返回，绝不编造 item_id 或链接。
+  expected_output: >-
+    发布结果 JSON：status（published/dry_run/skipped）、title、item_id、
+    published_at；.douyin/state.json 已更新。
+  agent: douyin_publisher

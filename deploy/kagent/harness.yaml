@@ -1,0 +1,64 @@
+# kagent Harness：prompt2vid BYO（Bring Your Own）harness
+# api.kagent.dev/v1alpha3
+#
+# 要求（CRD CEL 校验）：
+# - workload.image 必须是 sha256 摘要格式：image@sha256:<64位十六进制>
+#   部署时替换占位符：
+#     docker build -t your-registry/prompt2vid:0.1.0 .
+#     docker push your-registry/prompt2vid:0.1.0
+#     docker inspect --format='{{index .RepoDigests 0}}' your-registry/prompt2vid:0.1.0
+# - BYO harness 必须指定 workload.command
+# - env 只接受 name+value 字面量（无 envFrom/Secret 引用），
+#   凭据值在部署时替换（参考 secret.yaml）
+apiVersion: api.kagent.dev/v1alpha3
+kind: Harness
+metadata:
+  name: prompt2vid-harness
+  namespace: kagent
+spec:
+  # BYO harness：运行我们自己的 A2A 服务器
+  byo: {}
+  substrate:
+    snapshotPolicy:
+      location: gs://your-bucket/kagent/prompt2vid/   # 替换为你的快照桶
+    workerPoolRef:
+      name: kagent-default   # kagent 安装时默认 worker pool
+  workload:
+    # 替换为你的镜像 sha256 摘要
+    image: your-registry/prompt2vid@sha256:0000000000000000000000000000000000000000000000000000000000000000
+    command:
+      - python
+      - -m
+      - prompt2vid.server
+      - --host
+      - 0.0.0.0
+    env:
+      - name: KAGENT_PORT
+        value: "80"
+      # LLM 配置（值在部署时替换，参考 secret.yaml）
+      - name: PROMPT2VID_MODEL
+        value: "openai/gpt-4o-mini"
+      - name: PROMPT2VID_LLM_BASE_URL
+        value: "https://your-llm-gateway.example.com/v1"
+      - name: PROMPT2VID_LLM_API_KEY
+        value: "sk-REPLACE_ME"
+      # ComfyUI（集群内服务）
+      - name: COMFYUI_URL
+        value: "http://comfyui.comfyui.svc.cluster.local:8188"
+      - name: COMFYUI_T2I_CHECKPOINT
+        value: "sd_xl_base_1.0.safetensors"
+      - name: COMFYUI_LTX_CHECKPOINT
+        value: "ltx-video-2b-v0.9.5.safetensors"
+      - name: COMFYUI_T5
+        value: "t5xxl_fp8_e4m3fn.safetensors"
+      - name: COMFYUI_T5_DEVICE
+        value: "cpu"
+      # 抖音（开发期 dry-run）
+      - name: DOUYIN_DRY_RUN
+        value: "true"
+      - name: DOUYIN_CLIENT_KEY
+        value: "REPLACE_ME"
+      - name: DOUYIN_CLIENT_SECRET
+        value: "REPLACE_ME"
+      - name: DOUYIN_ACCESS_TOKEN
+        value: "REPLACE_ME"

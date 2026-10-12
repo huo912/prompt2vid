@@ -1,0 +1,70 @@
+# ComfyUI GPU 部署（单节点 k8s，RTX 4060 8GB）
+# 前置：NVIDIA GPU Operator 或 nvidia device-plugin 已安装
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: comfyui
+  namespace: comfyui
+  labels:
+    app: comfyui
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate   # GPU 单卡 + RWO 卷，避免滚动更新时双实例抢卡
+  selector:
+    matchLabels:
+      app: comfyui
+  template:
+    metadata:
+      labels:
+        app: comfyui
+    spec:
+      containers:
+        - name: comfyui
+          # 构建后替换为你的镜像（建议带 sha256 摘要）
+          image: your-registry/comfyui:ltx-e8665ca
+          ports:
+            - containerPort: 8188
+          resources:
+            requests:
+              cpu: "2"
+              memory: 8Gi
+              nvidia.com/gpu: 1
+            limits:
+              cpu: "8"
+              memory: 32Gi
+              nvidia.com/gpu: 1
+          volumeMounts:
+            - name: models
+              mountPath: /app/ComfyUI/models
+            - name: output
+              mountPath: /app/ComfyUI/output
+            - name: input
+              mountPath: /app/ComfyUI/input
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 8188
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            failureThreshold: 30   # 首次启动加载模型较慢
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 8188
+            initialDelaySeconds: 120
+            periodSeconds: 30
+            failureThreshold: 5
+      volumes:
+        - name: models
+          persistentVolumeClaim:
+            claimName: comfyui-models
+        - name: output
+          persistentVolumeClaim:
+            claimName: comfyui-output
+        - name: input
+          persistentVolumeClaim:
+            claimName: comfyui-input
+      # 单节点集群：强制调度到 GPU 节点
+      nodeSelector:
+        nvidia.com/gpu.present: "true"

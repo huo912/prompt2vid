@@ -1,0 +1,28 @@
+plan_storyboard:
+  description: >-
+    将剧本（script.md）拆解为分镜表。
+    输入：script.md 的内容。
+    输出：将分镜表写入 storyboard.json（使用文件工具），并在最终回答中给出 JSON。
+    分镜表结构：
+    {
+      "shots": [
+        {
+          "id": 1,
+          "narration": "本镜旁白（中文）",
+          "visual": "画面描述（中文）",
+          "image_prompt": "英文 SDXL 文生图 prompt，含风格/构图/光线，与相邻分镜风格一致",
+          "motion_prompt": "英文 LTX 运动描述，如 'slow zoom in, gentle wind, falling leaves'",
+          "duration_seconds": 4
+        }
+      ],
+      "total_duration_seconds": 16
+    }
+    要求：
+    1. image_prompt 必须为英文、具体、含统一风格后缀（保持全片风格一致）；
+    2. motion_prompt 必须为英文、只描述镜头内运动（推拉摇移、元素运动）；
+    3. duration_seconds 每镜 3-5 秒（LTX 生成预算），总和等于需求时长；
+    4. narration 与剧本逐镜文案一致。
+  expected_output: >-
+    一个 JSON 分镜表（已写入 storyboard.json），shots 数组每项含 id、narration、
+    visual、image_prompt、motion_prompt、duration_seconds。
+  agent: storyboard_planner

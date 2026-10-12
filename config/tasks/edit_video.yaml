@@ -1,0 +1,15 @@
+edit_video:
+  description: >-
+    将所有素材合成为最终成片。
+    使用 ffmpeg 剪辑工具，按顺序执行：
+    1. assemble：按 clips/manifest.json 顺序拼接所有分镜片段 → final/merged.mp4；
+    2. mix_audio：按 audio/manifest.json 顺序拼接所有配音 → final/voiceover.mp3
+       （每段配音时长对齐到对应分镜时长，不足则静音填充）；
+    3. mux：将 merged.mp4 与 voiceover.mp3 混流 → final/video_with_audio.mp4；
+    4. burn_subtitles：根据 storyboard.json 的旁白生成 SRT 字幕并烧录 → final/final.mp4。
+    完成后用 ffprobe 验证成片时长、分辨率、音轨，并在最终回答中报告验证结果。
+    要求：每步必须真实调用工具并检查返回；素材缺失时如实报告失败，绝不编造。
+  expected_output: >-
+    final/final.mp4 最终成片（已拼接、混音、烧录字幕），
+    以及剪辑验证结果（时长/分辨率/音轨信息）。
+  agent: video_editor

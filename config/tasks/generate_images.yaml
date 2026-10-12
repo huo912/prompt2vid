@@ -1,0 +1,16 @@
+generate_images:
+  description: >-
+    为分镜表（storyboard.json）中每个分镜生成首帧图。
+    使用 ComfyUI 文生图工具（text_to_image），逐镜调用：
+    - prompt 使用分镜的 image_prompt；
+    - 负面提示词使用环境默认（COMFYUI_NEGATIVE_PROMPT）；
+    - 输出保存到工作目录 frames/ 下，文件名 shot_<id>.png。
+    全部生成完成后，将结果清单写入 frames/manifest.json：
+    {"shots": [{"id": 1, "image": "frames/shot_1.png"}, ...]}
+    并在最终回答中给出清单 JSON。
+    要求：每个分镜必须真实调用工具生成图片；如某镜失败，重试最多 2 次；
+    清单中的路径必须是工具真实返回的路径，绝不编造。
+  expected_output: >-
+    frames/ 目录下每个分镜一张首帧图，以及 frames/manifest.json 结果清单
+    （含每个分镜的真实图片路径）。
+  agent: image_generator

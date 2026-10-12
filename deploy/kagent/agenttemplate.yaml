@@ -1,0 +1,12 @@
+# kagent AgentTemplate：prompt2vid BYO 模板
+# api.kagent.dev/v1alpha3
+# BYO 型模板只需 description（系统提示由 A2A 服务器内的 Crew 承担）
+apiVersion: api.kagent.dev/v1alpha3
+kind: AgentTemplate
+metadata:
+  name: prompt2vid-template
+  namespace: kagent
+spec:
+  description: >-
+    一句话描述自动生成视频并发布到抖音的多智能体流水线
+    （需求分析 → 剧本 → 分镜 → 图像 → 视频 → 配音 → 剪辑 → 质检 → 发布）。

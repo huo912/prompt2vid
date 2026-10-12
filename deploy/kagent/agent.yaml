@@ -1,0 +1,13 @@
+# kagent Agent：绑定模板与 Harness
+# api.kagent.dev/v1alpha3
+# CEL 校验：template XOR templateRef、harness XOR harnessRef
+apiVersion: api.kagent.dev/v1alpha3
+kind: Agent
+metadata:
+  name: prompt2vid
+  namespace: kagent
+spec:
+  templateRef:
+    name: prompt2vid-template
+  harnessRef:
+    name: prompt2vid-harness

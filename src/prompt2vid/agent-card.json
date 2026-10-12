@@ -1,0 +1,38 @@
+{
+  "name": "prompt2vid",
+  "description": "一句话描述自动生成视频并发布到抖音的多智能体流水线（CrewAI + ComfyUI LTX-Video）。",
+  "version": "0.1.0",
+  "provider": {
+    "organization": "huo912",
+    "url": "https://github.com/huo912/prompt2vid"
+  },
+  "capabilities": {
+    "streaming": true,
+    "push_notifications": false
+  },
+  "default_input_modes": ["text"],
+  "default_output_modes": ["text", "task-status"],
+  "skills": [
+    {
+      "id": "prompt-to-video",
+      "name": "一句话生成视频",
+      "description": "根据一句简单描述自动完成需求分析、剧本、分镜、图像、视频、配音、剪辑、质检并发布到抖音。",
+      "tags": ["video-generation", "comfyui", "ltx-video", "douyin", "crewai"],
+      "examples": ["做一个关于秋天的治愈系短视频"],
+      "input_modes": ["text"],
+      "output_modes": ["text", "task-status"]
+    }
+  ],
+  "supported_interfaces": [
+    {
+      "protocol_binding": "JSONRPC",
+      "protocol_version": "1.0",
+      "url": "/a2a/jsonrpc"
+    },
+    {
+      "protocol_binding": "HTTP+JSON",
+      "protocol_version": "1.0",
+      "url": "/a2a/rest"
+    }
+  ]
+}

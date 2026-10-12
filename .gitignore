@@ -1,0 +1,21 @@
+# --- secrets / local config ---
+.env
+
+# --- python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+build/
+dist/
+.venv/
+venv/
+
+# --- runtime outputs (keep placeholder) ---
+output/*
+!output/.gitkeep
+
+# --- IDE / OS ---
+.idea/
+.vscode/
+.DS_Store
