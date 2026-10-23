@@ -40,26 +40,71 @@ STORYBOARD = {
     "total_duration_seconds": 7,
 }
 
+CHARACTER_DESCRIPTION = "a young woman with long black hair, wearing a red knit sweater"
+
+STORYBOARD_WITH_CHARACTERS = {
+    "characters": [
+        {"id": 1, "name": "女主", "description": CHARACTER_DESCRIPTION},
+    ],
+    "shots": [
+        {
+            "id": 1,
+            "characters": [1],
+            "narration": "少女入园",
+            "visual": "红衣少女站在公园",
+            "image_prompt": "autumn park, golden leaves",
+            "motion_prompt": "slow zoom in",
+            "duration_seconds": 4,
+        },
+        {
+            "id": 2,
+            "narration": "空镜落叶",
+            "visual": "落叶飘落",
+            "image_prompt": "falling leaves",
+            "motion_prompt": "gentle wind",
+            "duration_seconds": 3,
+        },
+    ],
+    "total_duration_seconds": 7,
+}
+
 
 class FakeComfyUIClient:
-    """批量客户端 mock：按提交序号决定成败，可模拟一次性失败。"""
+    """批量客户端 mock：按提交序号决定成败，可模拟一次性失败。
 
-    def __init__(self, fail_first_n: int = 0, fail_all: bool = False):
+    fail_first_n：前 n 个提交失败（含 wait/wait_all）。
+    fail_indices：指定序号集合失败（用于"定妆照成功、分镜失败"等场景）。
+    """
+
+    def __init__(
+        self,
+        fail_first_n: int = 0,
+        fail_all: bool = False,
+        fail_indices: set[int] | None = None,
+    ):
         self.submitted: list[dict] = []
         self.uploads: list[Path] = []
         self._fail_first_n = fail_first_n
         self._fail_all = fail_all
+        self._fail_indices = fail_indices or set()
+
+    def _fails(self, idx: int) -> bool:
+        return self._fail_all or idx in self._fail_indices or idx < self._fail_first_n
 
     def submit(self, workflow) -> str:
         pid = f"pid{len(self.submitted)}"
         self.submitted.append(workflow)
         return pid
 
+    def wait(self, prompt_id) -> dict:
+        if self._fails(int(prompt_id[3:])):
+            raise ComfyUITaskError("ComfyUI exploded")
+        return {"outputs": {"9": {"images": [{"filename": "out.png"}]}}}
+
     def wait_all(self, prompt_ids) -> dict:
         results = {}
         for pid in prompt_ids:
-            idx = int(pid[3:])
-            if self._fail_all or idx < self._fail_first_n:
+            if self._fails(int(pid[3:])):
                 results[pid] = ComfyUITaskError("ComfyUI exploded")
             else:
                 results[pid] = {"outputs": {"9": {"images": [{"filename": "out.png"}]}}}
@@ -88,10 +133,10 @@ class FakeComfyUIClient:
         self.close()
 
 
-def _setup_workspace(tmp_path: Path, monkeypatch) -> Path:
+def _setup_workspace(tmp_path: Path, monkeypatch, storyboard: dict | None = None) -> Path:
     monkeypatch.setenv("PROMPT2VID_WORKSPACE", str(tmp_path))
     (tmp_path / "storyboard.json").write_text(
-        json.dumps(STORYBOARD, ensure_ascii=False), encoding="utf-8"
+        json.dumps(storyboard or STORYBOARD, ensure_ascii=False), encoding="utf-8"
     )
     return tmp_path
 
@@ -181,6 +226,85 @@ def test_generate_frames_skips_existing(tmp_path, monkeypatch):
 
     assert len(fake.submitted) == 1  # 只有镜 2 需要生成
     assert summary["succeeded"] == 2
+
+
+# ------------------------------------------------------------ 角色一致性
+
+
+def test_generate_frames_with_character_reference(tmp_path, monkeypatch):
+    """IPAdapter 开启：先出角色定妆照，出镜分镜带参考，空镜不带。"""
+    ws = _setup_workspace(tmp_path, monkeypatch, STORYBOARD_WITH_CHARACTERS)
+    monkeypatch.setenv("COMFYUI_IPADAPTER", "true")
+    fake = _use_fake_client(monkeypatch)
+
+    summary = stages.generate_frames()
+
+    assert summary["succeeded"] == 2
+    # 提交序：0=定妆照，1=镜1（带参考），2=镜2（空镜）
+    assert len(fake.submitted) == 3
+    ref_wf, shot1_wf, shot2_wf = fake.submitted
+    # 定妆照：1024 方图，prompt 含角色外观契约
+    assert ref_wf["70"]["inputs"]["width"] == ref_wf["70"]["inputs"]["height"] == 1024
+    assert CHARACTER_DESCRIPTION in ref_wf["6"]["inputs"]["text"]
+    assert (ws / "frames" / "character_ref_1.png").is_file()
+    # 定妆照已上传，出镜分镜携带 IPAdapter 节点
+    assert [p.name for p in fake.uploads] == ["character_ref_1.png"]
+    assert shot1_wf["ref_apply"]["class_type"] == "IPAdapter"
+    assert shot1_wf["3"]["inputs"]["model"] == ["ref_apply", 0]
+    assert shot1_wf["ref_image"]["inputs"]["image"] == "character_ref_1.png"
+    # 一期契约：出镜分镜的 prompt 含角色外观描述
+    assert CHARACTER_DESCRIPTION in shot1_wf["6"]["inputs"]["text"]
+    # 空镜分镜：纯 t2i，不注入参考
+    assert not any(key.startswith("ref_") for key in shot2_wf)
+
+
+def test_generate_frames_reference_disabled_by_default(tmp_path, monkeypatch):
+    """默认关闭：只走一期 prompt 契约，无定妆照、无 IPAdapter 节点。"""
+    _setup_workspace(tmp_path, monkeypatch, STORYBOARD_WITH_CHARACTERS)
+    fake = _use_fake_client(monkeypatch)
+
+    summary = stages.generate_frames()
+
+    assert summary["succeeded"] == 2
+    assert len(fake.submitted) == 2
+    assert fake.uploads == []
+    for wf in fake.submitted:
+        assert not any(key.startswith("ref_") for key in wf)
+    # 一期契约仍生效：出镜分镜 prompt 已含角色外观描述
+    assert CHARACTER_DESCRIPTION in fake.submitted[0]["6"]["inputs"]["text"]
+
+
+def test_generate_frames_reference_failure_falls_back(tmp_path, monkeypatch):
+    """定妆照生成失败：警告并全部回退无参考，流水线不中断。"""
+    ws = _setup_workspace(tmp_path, monkeypatch, STORYBOARD_WITH_CHARACTERS)
+    monkeypatch.setenv("COMFYUI_IPADAPTER", "true")
+    # 序号 0 = 定妆照 → 生成失败
+    fake = _use_fake_client(monkeypatch, fail_indices={0})
+
+    summary = stages.generate_frames()
+
+    assert summary["succeeded"] == 2
+    for wf in fake.submitted:
+        assert not any(key.startswith("ref_") for key in wf)
+    assert not (ws / "frames" / "character_ref_1.png").is_file()
+
+
+def test_generate_frames_degrades_reference_on_retry(tmp_path, monkeypatch):
+    """带参考的分镜失败后，重试轮自动降级为无参考。"""
+    _setup_workspace(tmp_path, monkeypatch, STORYBOARD_WITH_CHARACTERS)
+    monkeypatch.setenv("COMFYUI_IPADAPTER", "true")
+    monkeypatch.setenv("COMFYUI_RETRIES", "1")
+    # 0=定妆照(成功)，1=镜1带参考(失败)，2=镜2空镜(成功)
+    fake = _use_fake_client(monkeypatch, fail_indices={1})
+
+    summary = stages.generate_frames()
+
+    assert summary["succeeded"] == 2
+    assert len(fake.submitted) == 4  # 定妆照 + 首批 2 镜 + 重试 1 镜
+    _, shot1_first, _, shot1_retry = fake.submitted
+    assert shot1_first["ref_apply"]["class_type"] == "IPAdapter"
+    # 重试轮降级：镜 1 不再携带参考节点
+    assert not any(key.startswith("ref_") for key in shot1_retry)
 
 
 def test_generate_clips_batch_from_frames_manifest(tmp_path, monkeypatch):

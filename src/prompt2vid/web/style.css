@@ -1,0 +1,244 @@
+/* prompt2vid 调试控制台 —— 深色单页样式 */
+
+:root {
+  --bg: #0f1115;
+  --panel: #171a21;
+  --panel-2: #1d212b;
+  --border: #2a2f3c;
+  --text: #d7dce5;
+  --muted: #8a93a6;
+  --accent: #4f8cff;
+  --ok: #34c98e;
+  --bad: #f0564f;
+  --warn: #e6a23c;
+  --running: #4f8cff;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 14px/1.6 "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+}
+
+header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 16px;
+  padding: 14px 20px 10px;
+  border-bottom: 1px solid var(--border);
+}
+header h1 { font-size: 18px; margin: 0; }
+.brand { display: flex; align-items: baseline; gap: 10px; }
+.server-note { color: var(--muted); font-size: 12px; }
+
+.sub { color: var(--muted); font-weight: normal; font-size: 12px; margin-left: 8px; }
+
+.card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 14px 16px;
+  margin-bottom: 14px;
+}
+.card h2 { font-size: 14px; margin: 0 0 10px; }
+
+/* ---- 新建运行 ---- */
+.new-run { margin: 14px 20px 0; }
+.new-run label { display: block; margin-bottom: 6px; color: var(--muted); }
+.new-run-row { display: flex; gap: 10px; }
+.new-run-row textarea {
+  flex: 1;
+  resize: vertical;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  padding: 8px 10px;
+  font: inherit;
+}
+.new-run-actions { display: flex; flex-direction: column; gap: 6px; justify-content: center; }
+
+/* ---- 布局 ---- */
+.layout {
+  display: grid;
+  grid-template-columns: 280px 1fr;
+  gap: 14px;
+  padding: 14px 20px 30px;
+  align-items: start;
+}
+@media (max-width: 900px) { .layout { grid-template-columns: 1fr; } }
+
+/* ---- 运行列表 ---- */
+.runs { position: sticky; top: 10px; }
+.runs ul { list-style: none; margin: 0; padding: 0; max-height: 70vh; overflow: auto; }
+.run-item {
+  padding: 8px 10px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  cursor: pointer;
+  margin-bottom: 4px;
+}
+.run-item:hover { background: var(--panel-2); }
+.run-item.selected { border-color: var(--accent); background: var(--panel-2); }
+.run-item-head { display: flex; justify-content: space-between; align-items: center; gap: 6px; }
+.run-name { font-family: Consolas, monospace; font-size: 13px; }
+.run-item-prompt {
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.run-item-progress { color: var(--muted); font-size: 12px; }
+
+/* ---- 按钮 ---- */
+.btn {
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 5px 12px;
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.btn:hover { border-color: var(--accent); }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.btn.danger { color: var(--bad); }
+.btn.danger:hover { border-color: var(--bad); }
+.btn.warn { color: var(--warn); }
+.btn.warn:hover { border-color: var(--warn); }
+.btn.small { padding: 2px 8px; font-size: 12px; }
+.btn.link { text-decoration: none; display: inline-block; color: var(--accent); }
+.btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* ---- 运行详情头 ---- */
+.run-head { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 10px; }
+.run-title h2 { margin: 0; font-family: Consolas, monospace; font-size: 16px; }
+.run-title span { display: block; color: var(--text); margin-top: 2px; }
+.run-dir { display: block; color: var(--muted); font-size: 12px; margin-top: 4px; }
+.run-actions { display: flex; gap: 8px; align-items: flex-start; }
+
+.exec-banner {
+  width: 100%;
+  background: rgba(79, 140, 255, 0.12);
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  padding: 6px 12px;
+  color: var(--accent);
+}
+
+/* ---- 步骤表 ---- */
+.steps-table { width: 100%; border-collapse: collapse; }
+.steps-table th, .steps-table td {
+  text-align: left;
+  padding: 7px 8px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+.steps-table th { color: var(--muted); font-weight: normal; font-size: 12px; }
+.step-name { font-weight: 600; }
+.step-id { color: var(--muted); font-size: 12px; font-family: Consolas, monospace; }
+.step-error { color: var(--bad); font-size: 12px; margin-top: 4px; max-width: 420px; word-break: break-all; }
+.mono { font-family: Consolas, monospace; font-size: 12px; }
+.row-running { background: rgba(79, 140, 255, 0.08); }
+.actions { white-space: nowrap; }
+.actions .btn, .actions a { margin-right: 4px; margin-bottom: 2px; }
+.th-actions { width: 220px; }
+
+.badge {
+  display: inline-block;
+  border-radius: 10px;
+  padding: 1px 9px;
+  font-size: 12px;
+  border: 1px solid var(--border);
+  color: var(--muted);
+}
+.badge.done { color: var(--ok); border-color: var(--ok); }
+.badge.failed { color: var(--bad); border-color: var(--bad); }
+.badge.interrupted { color: var(--warn); border-color: var(--warn); }
+.badge.running { color: var(--running); border-color: var(--running); }
+.pulse { animation: pulse 1.2s infinite; }
+@keyframes pulse { 50% { opacity: 0.45; } }
+
+.kind { font-size: 12px; border-radius: 4px; padding: 1px 6px; }
+.kind-creative { background: rgba(155, 89, 182, 0.2); color: #c39bd3; }
+.kind-media { background: rgba(52, 201, 142, 0.15); color: var(--ok); }
+.kind-publish { background: rgba(230, 162, 60, 0.18); color: var(--warn); }
+
+.hint { color: var(--muted); font-size: 12px; margin-top: 8px; }
+
+/* ---- 产物 ---- */
+.artifact { border: 1px solid var(--border); border-radius: 8px; margin-bottom: 8px; }
+.artifact summary {
+  cursor: pointer;
+  padding: 7px 12px;
+  font-weight: 600;
+  list-style-position: inside;
+}
+.artifact summary:hover { background: var(--panel-2); }
+.artifact-body { padding: 4px 14px 12px; }
+.artifact pre {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px;
+  overflow: auto;
+  max-height: 320px;
+  font-size: 12px;
+}
+.artifact video { width: 100%; max-width: 420px; border-radius: 8px; background: #000; }
+.storyboard-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.storyboard-table th, .storyboard-table td {
+  border-bottom: 1px solid var(--border);
+  padding: 5px 6px;
+  text-align: left;
+  vertical-align: top;
+}
+.storyboard-table img {
+  width: 72px;
+  height: 40px;
+  object-fit: cover;
+  border-radius: 4px;
+  display: block;
+}
+.quality-line { margin: 2px 0; }
+.quality-line.ok { color: var(--ok); }
+.quality-line.bad { color: var(--bad); }
+
+/* ---- 日志 ---- */
+.log {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px;
+  font: 12px/1.5 Consolas, monospace;
+  max-height: 300px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+  margin: 0;
+}
+
+.empty { color: var(--muted); text-align: center; padding: 40px; }
+
+/* ---- 提示条 ---- */
+.toast {
+  position: fixed;
+  right: 20px;
+  bottom: 20px;
+  background: var(--panel-2);
+  border: 1px solid var(--ok);
+  color: var(--text);
+  border-radius: 8px;
+  padding: 10px 16px;
+  max-width: 480px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
+  z-index: 10;
+}
+.toast.error { border-color: var(--bad); }

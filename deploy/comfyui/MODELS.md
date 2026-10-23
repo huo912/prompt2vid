@@ -7,9 +7,16 @@
 | SDXL Base 1.0 | 分镜首帧文生图 | `checkpoints/sd_xl_base_1.0.safetensors` | ~6.9GB | https://hf-mirror.com/stabilityai/stable-diffusion-xl-base-1.0 |
 | LTX-Video 2B 0.9.5 | 图生视频 | `checkpoints/ltx-video-2b-v0.9.5.safetensors` | ~2.0GB | https://hf-mirror.com/Lightricks/LTX-Video |
 | T5-XXL fp8 | LTX 文本编码器 | `text_encoders/t5xxl_fp8_e4m3fn.safetensors` | ~4.9GB | https://hf-mirror.com/comfyanonymous/flux_text_encoders |
+| IPAdapter SDXL plus-face（可选） | 角色一致性：首帧参考注入 | `ipadapter/ip-adapter-plus-face_sdxl_vit-h.safetensors` | ~0.5GB | https://hf-mirror.com/h94/IP-Adapter |
+| CLIP Vision ViT-H（可选） | IPAdapter 图像编码器 | `clip_vision/CLIP-ViT-H-14-laion2B-s32B-b79K.safetensors` | ~2.5GB | https://hf-mirror.com/h94/IP-Adapter（`models/image_encoder/` 下） |
 
 > **网络提示**：公司网络直连 huggingface.co 会 504 超时，上表已换成
 > hf-mirror.com 镜像（实测可达）。也可用 modelscope.cn 等国内源。
+
+> **角色一致性（可选）**：镜像已内置 ComfyUI_IPAdapter_plus 自定义节点；
+> 下载上表最后两个模型并在 prompt2vid 的 `.env` 设 `COMFYUI_IPADAPTER=true`
+> 后，带角色的分镜首帧会注入角色定妆照参考。未下载时相关分镜自动回退为
+> 无参考生成，不影响流水线。详见 docs/LOCAL_SETUP.md 第 6 节。
 
 > **显存警告**：T5 必须用 fp8 量化版（`t5xxl_fp8_e4m3fn.safetensors`）。
 > fp16 版约 9GB+，8GB 显存必 OOM。`COMFYUI_T5_DEVICE=cpu`（默认）可把文本

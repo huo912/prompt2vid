@@ -6,9 +6,17 @@ plan_storyboard:
     相对路径即可，工具会自动落到工作目录），并在最终回答中给出同样的 JSON。
     分镜表结构：
     {
+      "characters": [
+        {
+          "id": 1,
+          "name": "角色中文名",
+          "description": "英文角色外观描述：发型发色、脸型肤色、年龄体型、服装款式颜色、标志性配饰，一段固定英文，所有分镜共用"
+        }
+      ],
       "shots": [
         {
           "id": 1,
+          "characters": [1],
           "narration": "本镜旁白（中文）",
           "visual": "画面描述（中文）",
           "image_prompt": "英文 SDXL 文生图 prompt，含风格/构图/光线，与相邻分镜风格一致",
@@ -19,16 +27,26 @@ plan_storyboard:
       "total_duration_seconds": 16
     }
     要求：
-    1. image_prompt 必须为英文、具体、含统一风格后缀（保持全片风格一致）；
-    2. motion_prompt 必须为英文、只描述镜头内运动（推拉摇移、元素运动）；
-    3. duration_seconds 每镜 3-5 秒（LTX 生成预算），总和等于需求时长，
+    1. 视频中出现人物时必须定义 characters 数组（无人物的纯空镜视频可不写）；
+       每个出场人物一张角色卡，description 必须具体到可复现（发色、服装颜色
+       款式、体型年龄等），禁止抽象描述（如 "a beautiful girl"）；
+    2. 每镜的 characters 字段列出该镜出场的角色 id（空镜写 [] 或不写）；
+    3. image_prompt 必须逐字包含该镜全部出场角色的 description 原文
+       （一字不改、按 id 顺序拼接），再叠加画面构图/光线/风格描述——
+       这是全片角色长相一致的关键约束；
+    4. image_prompt 的其余部分必须为英文、具体、含统一风格后缀
+       （保持全片风格一致）；
+    5. motion_prompt 必须为英文、只描述镜头内运动（推拉摇移、元素运动）；
+    6. duration_seconds 每镜 3-5 秒（LTX 生成预算），总和等于需求时长，
        镜头数控制在 4-8 个；
-    4. narration 与剧本逐镜文案一致；
-    5. id 从 1 开始连续编号；
-    6. 必须真实调用 write_json 工具把分镜表写入 storyboard.json
+    7. narration 与剧本逐镜文案一致；
+    8. id 从 1 开始连续编号；
+    9. 必须真实调用 write_json 工具把分镜表写入 storyboard.json
        （下游所有生成环节都从这个文件读取）。
   expected_output: >-
-    一个 JSON 分镜表（已通过文件工具写入 storyboard.json），shots 数组
-    每项含 id、narration、visual、image_prompt、motion_prompt、
-    duration_seconds，以及 total_duration_seconds。
+    一个 JSON 分镜表（已通过文件工具写入 storyboard.json）：characters 数组
+    每项含 id、name、description（固定英文外观描述）；shots 数组每项含 id、
+    characters（出场角色 id）、narration、visual、image_prompt（逐字包含
+    出场角色 description）、motion_prompt、duration_seconds，以及
+    total_duration_seconds。
   agent: storyboard_planner

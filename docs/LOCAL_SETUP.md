@@ -261,7 +261,79 @@ LTXVScheduler / SaveWEBM 等节点）。你的 ComfyUI 能打开页面不代表�
 
 ---
 
-## 6. 可选模型替换（非必需）
+## 6. 角色一致性（可选：IPAdapter 参考图注入）
+
+> 作用：让分镜里反复出场的人物（主角）在每一镜都长得一样。分两层生效：
+> ① **默认生效**——分镜规划时 LLM 产出 `characters` 角色卡，固定英文外观
+> 描述逐字进入每镜 image_prompt（`storyboard.py` 解析时兜底补入）；
+> ② **`COMFYUI_IPADAPTER=true` 时生效**——生图阶段先为每个角色生成一张
+> **定妆照**（`frames/character_ref_<id>.png`），出镜分镜的首帧生成通过
+> IPAdapter 注入该参考。第 ② 层需要按本节额外安装。
+
+### 6.1 安装自定义节点
+
+ComfyUI 原生没有 IPAdapter 节点，需要安装
+[ComfyUI_IPAdapter_plus](https://github.com/cubiq/ComfyUI_IPAdapter_plus)：
+
+```powershell
+cd "<ComfyUI目录>\custom_nodes"
+git clone https://github.com/cubiq/ComfyUI_IPAdapter_plus.git
+# 然后重启 ComfyUI
+```
+
+### 6.2 下载两个模型（约 3GB，走 hf-mirror）
+
+| 模型 | HF 仓库 | 文件 | 放置路径 | 大小 |
+|------|---------|------|---------|------|
+| IPAdapter SDXL plus-face | `h94/IP-Adapter` | `ip-adapter-plus-face_sdxl_vit-h.safetensors` | `models/ipadapter/` | ~0.5GB |
+| CLIP Vision ViT-H 图像编码器 | `h94/IP-Adapter` | `models/image_encoder/CLIP-ViT-H-14-laion2B-s32B-b79K.safetensors` | `models/clip_vision/` | ~2.5GB |
+
+```powershell
+$env:HF_ENDPOINT = "https://hf-mirror.com"
+
+# 1. IPAdapter adapter 权重 → models/ipadapter/
+huggingface-cli download h94/IP-Adapter `
+  ip-adapter-plus-face_sdxl_vit-h.safetensors `
+  --local-dir "<ComfyUI模型目录>\ipadapter"
+
+# 2. CLIP Vision 编码器 → models/clip_vision/
+huggingface-cli download h94/IP-Adapter `
+  models/image_encoder/CLIP-ViT-H-14-laion2B-s32B-b79K.safetensors `
+  --local-dir "<ComfyUI模型目录>\clip_vision_tmp"
+# 下载器会保留子目录结构，把文件挪到最终位置：
+Move-Item "<ComfyUI模型目录>\clip_vision_tmp\models\image_encoder\CLIP-ViT-H-14-laion2B-s32B-b79K.safetensors" `
+  "<ComfyUI模型目录>\clip_vision\"
+```
+
+### 6.3 开启与验证
+
+`.env` 中取消注释：
+
+```ini
+COMFYUI_IPADAPTER=true
+# 可选微调：
+# COMFYUI_IPADAPTER_PRESET=PLUS FACE (portraits)
+# COMFYUI_IPADAPTER_WEIGHT=0.8
+```
+
+验证：跑一个带人物的 prompt（如"一个红衣少女在公园捡银杏"），
+`run.log` 应出现「角色 … 定妆照已生成」，`frames/` 下多出
+`character_ref_1.png`，出镜分镜的工作流携带 IPAdapter 节点。
+
+> **容错**：未安装节点/模型不会报错中断——相关分镜自动回退为无参考生成
+> （run.log 有 warning），所以可以先不开、以后随时补装。
+>
+> **显存**：adapter + CLIP Vision 常驻约 +1.5GB；SDXL 生图阶段峰值仍在
+> 8GB 内（ComfyUI 自动权重 offload）。
+>
+> **增强**：需要更强的人脸身份保持时可换 FACEID 系列预设
+> （`COMFYUI_IPADAPTER_PRESET=FACEID PLUS v2`），但要求 ComfyUI 环境
+> 另装 insightface（`pip install insightface onnxruntime`）并下载对应
+> FaceID 模型；默认的 `PLUS FACE (portraits)` 无额外依赖。
+
+---
+
+## 7. 可选模型替换（非必需）
 
 保持默认即可跑通；想换只在** aesthetics / 风格**上做文章时参考（换后需同步改
 `.env` 对应变量为实际文件名）：
@@ -277,7 +349,7 @@ LTXVScheduler / SaveWEBM 等节点）。你的 ComfyUI 能打开页面不代表�
 
 ---
 
-## 7. 全部就绪后：一键跑通
+## 8. 全部就绪后：一键跑通
 
 ```powershell
 # 1. 终检（应全绿）

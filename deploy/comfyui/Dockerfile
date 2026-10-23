@@ -21,6 +21,12 @@ RUN git clone https://github.com/comfyanonymous/ComfyUI.git /app/ComfyUI \
     && cd /app/ComfyUI \
     && git checkout e8665ca8e4089ab917567cdb491308e1397663d4
 
+# IPAdapter 自定义节点（角色一致性参考图注入；adapter/CLIP Vision 模型
+# 放 PVC models/ipadapter 与 models/clip_vision，见 MODELS.md。
+# 模型未就位时不影响无参考生成，工作流会自动降级）
+RUN git clone https://github.com/cubiq/ComfyUI_IPAdapter_plus.git \
+    /app/ComfyUI/custom_nodes/ComfyUI_IPAdapter_plus
+
 WORKDIR /app/ComfyUI
 
 # 依赖 + PyAV（SaveWEBM/SaveVideo 需要）

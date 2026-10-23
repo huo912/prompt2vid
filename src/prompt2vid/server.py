@@ -1,5 +1,8 @@
 """A2A 服务器：以 a2a-sdk 暴露 prompt2vid Crew，供 kagent 调用。
 
+同时挂载 Web 调试控制台（GET / 页面 + /api/*，见 webui.py），与
+A2A 路由共存于同一端口。
+
 端口选择：KAGENT_PORT 环境变量（kagent harness 注入）优先，其次
 PROMPT2VID_PORT，默认 8081。
 """
@@ -97,11 +100,6 @@ def _load_agent_card() -> AgentCard:
 class Prompt2VidExecutor(AgentExecutor):
     """把 A2A 请求转交给 Crew 流水线执行。"""
 
-    # 流水线通过 PROMPT2VID_WORKSPACE 环境变量传递工作目录（进程级状态），
-    # 并发请求会互相覆盖，因此用锁把整条流水线串行化（GPU 生成本身也
-    # 不适合并行）。
-    _crew_lock = asyncio.Lock()
-
     def __init__(self) -> None:
         self.running_tasks: set[str] = set()
 
@@ -139,12 +137,16 @@ class Prompt2VidExecutor(AgentExecutor):
             run_dir.mkdir(parents=True, exist_ok=True)
 
             from .pipeline import run_pipeline
+            from .webui import EXECUTION_LOCK
 
-            async with Prompt2VidExecutor._crew_lock:
-                # run_pipeline 内部会覆盖式设置工作目录并写 run.log
-                # （此前 setdefault 会让第二个请求复用第一个请求的目录，
-                # 产物互相覆盖；锁同时避免并发请求的环境变量竞争）
-                result = await asyncio.to_thread(run_pipeline, query, run_dir)
+            def _run() -> Any:
+                # 与 Web 调试控制台共用进程级执行锁：工作目录经
+                # PROMPT2VID_WORKSPACE 进程级环境变量传递，任何并发执行
+                # 都会互相覆盖；GPU 生成本身也不适合并行
+                with EXECUTION_LOCK:
+                    return run_pipeline(query, run_dir)
+
+            result = await asyncio.to_thread(_run)
 
             await updater.add_artifact(
                 parts=[Part(text=str(result))],
@@ -197,6 +199,13 @@ def serve(host: str = "0.0.0.0", port: int | None = None) -> None:
     )
 
     app = FastAPI(title="prompt2vid A2A server")
+
+    # Web 调试控制台：GET / 页面 + /static/* 资源 + /api/*
+    # 必须先于 A2A 路由注册：a2a-sdk 的 rest 路由含租户 Mount /{tenant}，
+    # 会吞掉其后注册的单段前缀路径（/api/*、/static/* 全部 404）
+    from . import webui
+
+    webui.register_webui(app)
     add_a2a_routes_to_fastapi(
         app,
         agent_card_routes=agent_card_routes,

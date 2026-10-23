@@ -7,6 +7,7 @@
 prompt2vid 是一个多智能体视频生产系统：用户只需给出一句简单的描述（例如"做一个关于秋天的治愈系短视频"），系统即可自动完成 **需求分析 → 剧本撰写 → 分镜规划 → 图像生成 → 视频生成 → 配音 → 剪辑合成 → 质量检查 → 抖音发布** 的全流程，无需人工介入。
 
 - **多智能体协作**：基于 CrewAI，9 个专家 Agent 顺序流水线协作，每个 Agent / Task 均为独立文件，方便扩展与替换。
+- **角色一致性**：分镜表支持 `characters` 角色卡（固定英文外观描述逐字进入每镜 image_prompt，代码兜底补入）；可选开启 IPAdapter 定妆照参考注入，让出场人物全片长相一致。
 - **视频生成**：ComfyUI + LTX-Video 2B（RTX 4060 8GB 显存即可运行），文生图（SDXL）+ 图生视频（LTXV）。
 - **配音**：edge-tts（免费、支持中文，无需额外 API Key）。
 - **剪辑**：ffmpeg 拼接分镜片段、混音、烧录字幕。
@@ -82,8 +83,11 @@ prompt2vid/
 ├── src/prompt2vid/
 │   ├── crew.py                # Crew 构建（加载 config/ 下 YAML，装配工具）
 │   ├── main.py                # CLI 入口：python -m prompt2vid.main "描述"
-│   ├── server.py              # A2A 服务器（a2a-sdk，kagent 可调用）
+│   ├── server.py              # A2A 服务器（a2a-sdk，kagent 可调用）+ Web 控制台挂载
 │   ├── pipeline.py            # 流水线编排（crew/直连模式、续跑、清理、run.log）
+│   ├── steps.py               # 分步执行（9 步注册表 + 单步执行器 + steps.json）
+│   ├── webui.py               # Web 调试控制台（REST API + 后台执行管理）
+│   ├── web/                   # 控制台页面（原生 HTML/JS/CSS，无构建工具）
 │   ├── dynamic_llm.py         # LLM 配置（按 agent 覆盖模型，前缀自动补齐+实例缓存）
 │   ├── preflight.py           # 环境预检（ComfyUI/模型/节点/ffmpeg）
 │   ├── stages.py              # 确定性阶段引擎（批量提交/重试/清单）
@@ -127,6 +131,33 @@ prompt2vid --clean --keep 5
 ```
 
 每次运行会在 `output/run_<时间戳>/` 下产出：`requirement.json`、`script.md`、`storyboard.json`、`frames/`（分镜首帧）、`clips/`（分镜视频）、`audio/`（配音）、`final/`（成片 + 字幕）、`report/`（质检报告）。
+
+## 分步调试（Web 控制台）
+
+调试时不必整条流水线跑到底——9 个 agent 步骤可以拆开单独执行、单独重跑：
+
+```bash
+prompt2vid-server            # 或 python -m prompt2vid.server
+# 浏览器打开 http://127.0.0.1:8081/
+```
+
+控制台功能：
+
+- 输入一句话描述创建运行（可仅创建 / 立即跑创意三步 / 跑全部）；
+- 每一步可单独 **「▶ 此步」** 执行、**「▶ 到最后」** 从该步跑到发布；媒体步骤可 **「↻ 强制」**（先删该阶段产物目录再重跑；不加强制时已生成的分镜文件自动跳过）；
+- 步骤状态（未开始 / 运行中 / 完成 / 失败 / 中断）来自 run 目录的 `steps.json` 与产物存在性——**CLI 跑的历史运行也能识别**；
+- 实时查看 `run.log` 尾部（2s 轮询）、分镜表（含首帧缩略图）、剧本 / 需求 / 质检报告，`final.mp4` 在线播放；
+- 与 A2A 请求共用进程级执行锁，同一时刻只有一个执行流（工作目录经 `PROMPT2VID_WORKSPACE` 进程级环境变量传递，并发会串目录）。
+
+CLI 等价能力（与控制台共用同一条执行路径）：
+
+```bash
+prompt2vid --list-steps                                     # 查看步骤 id
+prompt2vid "..." --only analyze_requirement,write_script    # 新建运行只跑指定步骤
+prompt2vid --resume output/run_xxx --only render --force    # 复用已有产物，强制重跑渲染
+```
+
+说明：创意步骤（需求 / 剧本 / 分镜）与发布走 LLM 单任务 crew；媒体五步直接执行 `stages.py` 的确定性函数——与对应 agent 转调的阶段工具是同一实现，只是省掉一次 LLM 往返。
 
 ## k8s 部署（单节点集群）
 
@@ -200,6 +231,8 @@ curl -X POST http://<pod-ip>:8081/a2a/jsonrpc \
 
 > 本地运行的完整配置手册（模型清单、hf-mirror 下载命令、ffmpeg 安装、
 > 8GB 显存调优）见 **[docs/LOCAL_SETUP.md](docs/LOCAL_SETUP.md)**；
+> ComfyUI 零基础配置指南（哪个节点用哪个模型、文件放哪里）见
+> **[docs/deploy.md](docs/deploy.md)**；
 > k8s 部署的模型下载见 [deploy/comfyui/MODELS.md](deploy/comfyui/MODELS.md)。
 
 | 模型 | 用途 | 放置路径（ComfyUI PVC 内） | 下载 |
@@ -231,6 +264,8 @@ curl -X POST http://<pod-ip>:8081/a2a/jsonrpc \
 | `COMFYUI_T2I_CHECKPOINT` / `COMFYUI_LTX_CHECKPOINT` / `COMFYUI_T5` | ComfyUI 模型文件名 |
 | `COMFYUI_T2I_STEPS` / `COMFYUI_LTX_STEPS` | 采样步数（默认 25 / 10；LTX 0.9.5 蒸馏版 8-13 步即可） |
 | `COMFYUI_RETRIES` | 单镜生成失败重试次数（默认 2，按批次重试） |
+| `COMFYUI_IPADAPTER` | true 时启用角色一致性参考注入（分镜表含 `characters` 时先生成角色定妆照，出镜分镜首帧注入参考；需 ComfyUI 装 ComfyUI_IPAdapter_plus + 两个模型，见 [docs/LOCAL_SETUP.md](docs/LOCAL_SETUP.md) 第 6 节；未就位时自动回退无参考生成） |
+| `COMFYUI_IPADAPTER_PRESET` / `COMFYUI_IPADAPTER_WEIGHT` | IPAdapter 预设与注入权重（默认 `PLUS FACE (portraits)` / 0.8） |
 | `COMFYUI_LTX_FPS` / `COMFYUI_LTX_MAX_FRAMES` | LTX 帧率（25）与单镜帧数上限（121，帧数自动满足 8n+1） |
 | `PROMPT2VID_SEED` | 固定种子复现（逐镜 +1；不设则随机） |
 | `PROMPT2VID_DIRECT_MEDIA` | true 时直接媒体模式（LLM 只做创意+发布） |

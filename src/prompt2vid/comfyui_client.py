@@ -45,6 +45,14 @@ DEFAULT_LTX_NEGATIVE = (
     "motion smear, motion artifacts, fused fingers, bad anatomy, weird hand, ugly"
 )
 
+# 角色一致性（IPAdapter 参考图注入）：需在 ComfyUI 安装
+# ComfyUI_IPAdapter_plus 自定义节点 + 对应模型（见 docs/LOCAL_SETUP.md）。
+# 预设决定 Unified Loader 加载哪个 adapter 模型：
+# "PLUS FACE (portraits)" 只需 ip-adapter-plus-face_sdxl + CLIP-ViT-H；
+# FACEID 系列更强但需要 insightface。
+DEFAULT_IPADAPTER_PRESET = "PLUS FACE (portraits)"
+DEFAULT_IPADAPTER_WEIGHT = 0.8
+
 # LTX 输出帧率（与 LTXVConditioning.frame_rate 保持一致）
 LTX_FPS = 25.0
 
@@ -79,6 +87,13 @@ def next_seed() -> int:
         except ValueError:
             pass
     return random.randint(0, 2**32 - 1)
+
+
+def ipadapter_enabled() -> bool:
+    """是否启用 IPAdapter 角色参考注入（COMFYUI_IPADAPTER 真值）。"""
+    return os.getenv("COMFYUI_IPADAPTER", "").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
 
 
 class ComfyUITaskError(RuntimeError):
@@ -230,15 +245,23 @@ def build_t2i_workflow(
     width: int = 768,
     height: int = 1344,
     seed: int | None = None,
+    reference: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """SDXL 文生图工作流（API 格式）。
 
     节点链：CheckpointLoaderSimple → CLIPTextEncode(正/负) →
     EmptyLatentImage → KSampler → VAEDecode → SaveImage
+
+    Args:
+        reference: 角色参考图注入（IPAdapter）。传 {"image_name": 已上传的
+            参考图名} 即可，weight/preset 缺省读 COMFYUI_IPADAPTER_WEIGHT /
+            COMFYUI_IPADAPTER_PRESET。节点链变为：
+            CheckpointLoader → IPAdapterUnifiedLoader → IPAdapter(参考图)
+            → KSampler，需要 ComfyUI 安装 ComfyUI_IPAdapter_plus。
     """
     ckpt = env_str("COMFYUI_T2I_CHECKPOINT", DEFAULT_T2I_CHECKPOINT)
     negative = negative_prompt or env_str("COMFYUI_NEGATIVE_PROMPT", DEFAULT_T2I_NEGATIVE)
-    return {
+    workflow: dict[str, Any] = {
         "44": {
             "class_type": "CheckpointLoaderSimple",
             "inputs": {"ckpt_name": ckpt},
@@ -279,6 +302,47 @@ def build_t2i_workflow(
             "inputs": {"images": ["8", 0], "filename_prefix": "prompt2vid"},
         },
     }
+    if reference and reference.get("image_name"):
+        workflow["3"]["inputs"]["model"] = _apply_ipadapter(workflow, reference)
+    return workflow
+
+
+def _apply_ipadapter(
+    workflow: dict[str, Any], reference: dict[str, Any]
+) -> list[Any]:
+    """注入 IPAdapter 参考图节点链，返回 KSampler 应使用的 MODEL 输出。
+
+    节点签名对照 ComfyUI_IPAdapter_plus（cubiq）当前版本；未安装该
+    自定义节点或模型时 ComfyUI 会拒绝工作流，由调用方（stages 的
+    重试机制）降级为无参考生成。
+    """
+    weight = reference.get("weight")
+    if weight is None:
+        weight = env_float("COMFYUI_IPADAPTER_WEIGHT", DEFAULT_IPADAPTER_WEIGHT)
+    preset = reference.get("preset") or env_str(
+        "COMFYUI_IPADAPTER_PRESET", DEFAULT_IPADAPTER_PRESET
+    )
+    workflow["ref_image"] = {
+        "class_type": "LoadImage",
+        "inputs": {"image": reference["image_name"]},
+    }
+    workflow["ref_loader"] = {
+        "class_type": "IPAdapterUnifiedLoader",
+        "inputs": {"model": ["44", 0], "ipadapter": preset},
+    }
+    workflow["ref_apply"] = {
+        "class_type": "IPAdapter",
+        "inputs": {
+            "model": ["ref_loader", 0],
+            "ipadapter": ["ref_loader", 1],
+            "image": ["ref_image", 0],
+            "weight": weight,
+            "weight_faceidv2": False,
+            "weight_kolors": False,
+            "combine_embeds": "concat",
+        },
+    }
+    return ["ref_apply", 0]
 
 
 def build_i2v_workflow(

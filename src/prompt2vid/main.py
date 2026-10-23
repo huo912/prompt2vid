@@ -12,7 +12,10 @@
     prompt2vid "做一个关于秋天的治愈系短视频"          # 全流程
     prompt2vid "..." --direct-media                    # 直连媒体模式（省 6 次 LLM 往返）
     prompt2vid --check-only                            # 只做环境预检
-    prompt2vid --resume output/run_xxx --from render   # 断点续跑
+    prompt2vid --list-steps                            # 查看可分步执行的步骤 id
+    prompt2vid "..." --only plan_storyboard            # 只执行指定步骤（分步调试）
+    prompt2vid --resume output/run_xxx --only render --force   # 复用产物强制重跑渲染
+    prompt2vid --resume output/run_xxx --from render --publish # 断点续跑
     prompt2vid --clean --keep 5                        # 清理旧运行目录
 """
 
@@ -95,6 +98,22 @@ def main(argv: list[str] | None = None) -> int:
         help="强制 crew 全流程模式（9 agent）",
     )
     parser.add_argument(
+        "--only",
+        default=None,
+        help="只执行指定步骤（逗号分隔的步骤 id，如 --only write_script,plan_storyboard；"
+             "配合 --resume 复用已有产物；步骤 id 见 --list-steps）",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="配合 --only：媒体步骤先删除该阶段产物目录再重跑（默认跳过已有文件）",
+    )
+    parser.add_argument(
+        "--list-steps",
+        action="store_true",
+        help="列出可分步执行的步骤 id 与说明",
+    )
+    parser.add_argument(
         "--resume",
         metavar="RUN_DIR",
         default=None,
@@ -144,6 +163,18 @@ def main(argv: list[str] | None = None) -> int:
 
         return 0 if run_preflight() else 2
 
+    if args.list_steps:
+        from . import steps as steps_mod
+
+        print("可分步执行的步骤（--only / Web 控制台可选）:")
+        for entry in steps_mod.catalog():
+            stage = f"，阶段 {entry['stage']}" if entry["stage"] else ""
+            print(
+                f"  {entry['index']}. {entry['id']:<22} {entry['label']}"
+                f"（agent: {entry['agent']}{stage}）"
+            )
+        return 0
+
     if args.resume:
         run_dir = Path(args.resume).resolve()
         if not run_dir.is_dir():
@@ -151,7 +182,10 @@ def main(argv: list[str] | None = None) -> int:
             return 2
     else:
         if not args.prompt:
-            parser.error("请提供视频内容的一句话描述（或使用 --check-only / --resume / --clean）")
+            parser.error(
+                "请提供视频内容的一句话描述"
+                "（或使用 --check-only / --resume / --only / --list-steps / --clean）"
+            )
         if args.workspace:
             run_dir = Path(args.workspace).resolve()
             run_dir.mkdir(parents=True, exist_ok=True)
@@ -164,8 +198,30 @@ def main(argv: list[str] | None = None) -> int:
         if not run_preflight():
             return 2
 
+    from . import steps as steps_mod
     from .pipeline import run_pipeline, run_resume
     from .workspace import set_workspace
+
+    if args.prompt:
+        # 记录一句话描述：Web 控制台展示 / 单步补跑 analyze_requirement 时使用
+        steps_mod.write_meta(run_dir, args.prompt)
+
+    if args.only:
+        only_ids = [s.strip() for s in args.only.split(",") if s.strip()]
+        unknown = [i for i in only_ids if i not in steps_mod.STEP_INDEX]
+        if unknown:
+            print(f"错误: 未知步骤: {unknown}（--list-steps 查看可选值）")
+            return 2
+        results = steps_mod.run_steps(
+            run_dir, only_ids, prompt=args.prompt, force=args.force
+        )
+        print("\n===== 步骤执行结果 =====")
+        for r in results:
+            mark = "✓" if r["status"] == "done" else "✗"
+            err = f" — {r['error']}" if r.get("error") else ""
+            print(f"  {mark} {r['step']}（{r['label']}）{r['duration_seconds']}s{err}")
+        _print_run_summary(run_dir)
+        return 0 if all(r["status"] == "done" for r in results) else 1
 
     if args.resume:
         result = run_resume(run_dir, from_stage=args.from_stage, publish=args.publish)

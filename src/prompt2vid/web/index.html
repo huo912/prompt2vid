@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>prompt2vid 调试控制台</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header>
+  <div class="brand">
+    <h1>prompt2vid 调试控制台</h1>
+    <span class="sub">分步执行 · 单 agent 调试</span>
+  </div>
+  <div class="server-note">创意/发布步骤走 LLM（单任务 crew）· 媒体步骤直跑确定性代码</div>
+</header>
+
+<section class="new-run card">
+  <label for="prompt-input">新的一句描述</label>
+  <div class="new-run-row">
+    <textarea id="prompt-input" rows="2" placeholder="例：做一个关于秋天的治愈系短视频"></textarea>
+    <div class="new-run-actions">
+      <button id="btn-create" class="btn">仅创建</button>
+      <button id="btn-create-creative" class="btn">创建并跑创意三步</button>
+      <button id="btn-create-all" class="btn primary">创建并跑全部</button>
+    </div>
+  </div>
+</section>
+
+<div class="layout">
+  <aside class="card runs">
+    <h2>运行列表</h2>
+    <ul id="run-list"></ul>
+  </aside>
+
+  <main id="main">
+    <div id="empty-state" class="card empty">
+      左侧选择一个运行，或用上方输入创建新运行。
+    </div>
+
+    <div id="run-detail" hidden>
+      <div class="card run-head">
+        <div class="run-title">
+          <h2 id="run-id"></h2>
+          <span id="run-prompt"></span>
+          <code id="run-dir" class="run-dir"></code>
+        </div>
+        <div class="run-actions">
+          <button id="btn-run-all" class="btn primary">▶ 全部运行</button>
+          <button id="btn-cancel" class="btn danger">■ 取消</button>
+        </div>
+        <div id="exec-banner" class="exec-banner" hidden></div>
+      </div>
+
+      <div class="card">
+        <h2>步骤 <span class="sub">可单独执行任意一步，失败即停</span></h2>
+        <table class="steps-table">
+          <thead>
+            <tr>
+              <th>#</th><th>步骤</th><th>agent</th><th>类型</th>
+              <th>状态</th><th>耗时</th><th class="th-actions">操作</th>
+            </tr>
+          </thead>
+          <tbody id="steps-body"></tbody>
+        </table>
+        <div class="hint">
+          「▶ 到最后」从该步按顺序跑到发布；媒体步骤的「↻ 强制」会先删除该阶段的产物目录再重跑
+          （未加强制时已生成的分镜文件会自动跳过）。
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>产物</h2>
+        <div id="artifacts"></div>
+      </div>
+
+      <div class="card">
+        <h2>运行日志 <span class="sub">run.log，每 2 秒刷新</span></h2>
+        <pre id="log-panel" class="log">（暂无日志）</pre>
+      </div>
+    </div>
+  </main>
+</div>
+
+<div id="toast" class="toast" hidden></div>
+<script src="/static/app.js"></script>
+</body>
+</html>

@@ -103,3 +103,142 @@ def test_read_manifest(tmp_path: Path):
     assert len(storyboard.read_manifest(path)) == 1
     with pytest.raises(FileNotFoundError):
         storyboard.read_manifest(tmp_path / "missing.json")
+
+
+# ------------------------------------------------------------ 角色一致性
+
+CHARACTER_DESCRIPTION = "a young woman with long black hair, wearing a red knit sweater"
+
+
+def _write_with_characters(
+    tmp_path: Path,
+    shots: list[dict] | None = None,
+    characters: list[dict] | None = None,
+) -> Path:
+    data = {
+        "characters": characters
+        if characters is not None
+        else [{"id": 1, "name": "女主", "description": CHARACTER_DESCRIPTION}],
+        "shots": shots
+        if shots is not None
+        else [
+            {
+                "id": 1,
+                "characters": [1],
+                "narration": "少女入园",
+                "visual": "红衣少女站在公园",
+                "image_prompt": "autumn park, golden leaves",
+                "motion_prompt": "slow zoom in",
+                "duration_seconds": 4,
+            },
+            {
+                "id": 2,
+                "narration": "空镜落叶",
+                "visual": "落叶飘落",
+                "image_prompt": "falling leaves",
+                "motion_prompt": "gentle wind",
+                "duration_seconds": 3,
+            },
+        ],
+    }
+    return _write(tmp_path / "storyboard.json", json.dumps(data, ensure_ascii=False))
+
+
+def test_load_characters(tmp_path: Path):
+    path = _write_with_characters(tmp_path)
+    characters = storyboard.load_characters(path)
+    assert list(characters) == [1]
+    assert characters[1].name == "女主"
+    assert characters[1].description == CHARACTER_DESCRIPTION
+
+
+def test_load_characters_absent(tmp_path: Path):
+    path = _write(
+        tmp_path / "storyboard.json",
+        json.dumps({"shots": [{"id": 1, "image_prompt": "a"}]}),
+    )
+    assert storyboard.load_characters(path) == {}
+
+
+def test_shot_characters_and_prompt_embedding(tmp_path: Path):
+    path = _write_with_characters(tmp_path)
+    shots = storyboard.load_storyboard(path)
+
+    assert shots[0].characters == [1]
+    # 出场角色的外观描述逐字补入 image_prompt（LLM 漏写时代码兜底）
+    assert shots[0].image_prompt == f"autumn park, golden leaves, {CHARACTER_DESCRIPTION}"
+    assert any("补入角色" in f for f in shots[0].fixes)
+    # 空镜不受影响
+    assert shots[1].characters == []
+    assert shots[1].image_prompt == "falling leaves"
+    assert shots[1].fixes == []
+
+
+def test_prompt_already_contains_description_not_duplicated(tmp_path: Path):
+    shot = {
+        "id": 1,
+        "characters": [1],
+        "narration": "n",
+        "visual": "v",
+        "image_prompt": f"girl in park, {CHARACTER_DESCRIPTION}",
+        "duration_seconds": 4,
+    }
+    path = _write_with_characters(tmp_path, shots=[shot])
+    shots = storyboard.load_storyboard(path)
+    assert shots[0].image_prompt.count(CHARACTER_DESCRIPTION) == 1
+    assert not any("补入角色" in f for f in shots[0].fixes)
+
+
+def test_undefined_character_marker_ignored(tmp_path: Path):
+    shot = {
+        "id": 1,
+        "characters": [9],
+        "narration": "n",
+        "visual": "v",
+        "image_prompt": "a girl",
+        "duration_seconds": 4,
+    }
+    path = _write_with_characters(tmp_path, shots=[shot])
+    shots = storyboard.load_storyboard(path)
+    assert shots[0].characters == []
+    assert any("未在 characters 定义" in f for f in shots[0].fixes)
+
+
+def test_character_without_description_dropped(tmp_path: Path):
+    characters = [
+        {"id": 1, "name": "无描述角色"},  # 无 description → 丢弃
+        {"id": 2, "name": "路人", "description": "a man in a blue jacket"},
+    ]
+    shot = {
+        "id": 1,
+        "characters": [1, 2],
+        "narration": "n",
+        "visual": "v",
+        "image_prompt": "city street",
+        "duration_seconds": 4,
+    }
+    path = _write_with_characters(tmp_path, shots=[shot], characters=characters)
+    shots = storyboard.load_storyboard(path)
+    # 只有带描述的角色 2 生效，其描述补入 prompt
+    assert shots[0].characters == [2]
+    assert "a man in a blue jacket" in shots[0].image_prompt
+
+
+def test_backward_compatible_storyboard_without_characters(tmp_path: Path):
+    """旧格式（无 characters）：解析行为与此前完全一致。"""
+    data = {
+        "shots": [
+            {
+                "id": 1,
+                "narration": "n",
+                "visual": "v",
+                "image_prompt": "autumn park",
+                "motion_prompt": "slow zoom",
+                "duration_seconds": 4,
+            }
+        ]
+    }
+    path = _write(tmp_path / "storyboard.json", json.dumps(data, ensure_ascii=False))
+    shots = storyboard.load_storyboard(path)
+    assert shots[0].characters == []
+    assert shots[0].image_prompt == "autumn park"

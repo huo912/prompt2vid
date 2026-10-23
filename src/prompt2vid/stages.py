@@ -31,8 +31,18 @@ from .comfyui_client import (
     build_t2i_workflow,
     env_int,
     env_str,
+    ipadapter_enabled,
+    run_text_to_image,
 )
-from .storyboard import Shot, StoryboardError, extract_json, load_storyboard, read_manifest
+from .storyboard import (
+    Character,
+    Shot,
+    StoryboardError,
+    extract_json,
+    load_characters,
+    load_storyboard,
+    read_manifest,
+)
 from .workspace import resolve_in_workspace, workspace_root
 
 logger = logging.getLogger("prompt2vid.stages")
@@ -136,17 +146,77 @@ def _summary(stage: str, entries: list[dict], manifest_rel: str) -> dict:
     return summary
 
 
+def _reference_prompt(character: Character) -> str:
+    """角色定妆照 prompt：外观契约 + 人像构图提示（1024 方图，供 IPAdapter 用）。"""
+    return (
+        f"{character.description}, character reference sheet, upper body portrait, "
+        "detailed face, neutral expression, looking at viewer, "
+        "plain clean background, sharp focus, high detail"
+    )
+
+
+def _prepare_character_refs(
+    ws: Path, characters: dict[int, Character], client: ComfyUIClient
+) -> dict[int, dict]:
+    """为每个角色生成/复用一张定妆照并上传，返回 char_id → 参考图注入参数。
+
+    已有的定妆照直接复用（断点续跑）；某个角色生成或上传失败只警告，
+    对应分镜回退为无参考生成——参考注入是锦上添花，不能阻塞出图。
+    """
+    refs: dict[int, dict] = {}
+    for cid, character in sorted(characters.items()):
+        dest = ws / FRAMES_DIR / f"character_ref_{cid}.png"
+        try:
+            if not (dest.is_file() and dest.stat().st_size > 0):
+                run_text_to_image(
+                    prompt=_reference_prompt(character),
+                    dest=dest,
+                    width=1024,
+                    height=1024,
+                    client=client,
+                )
+                logger.info("frames: 角色 %s 定妆照已生成: %s",
+                            character.name or cid, dest.name)
+            refs[cid] = {"image_name": client.upload_image(dest)}
+        except Exception as exc:  # noqa: BLE001 - 参考图失败不阻塞出图
+            logger.warning(
+                "frames: 角色 %s 定妆照生成/上传失败，相关分镜将以无参考生成: %s",
+                character.name or cid, exc,
+            )
+    return refs
+
+
+def _shot_reference(
+    shot: Shot, refs: dict[int, dict]
+) -> dict | None:
+    """取该镜第一个已就绪的角色参考（多角色镜头以主角色为准）。"""
+    for cid in shot.characters:
+        if cid in refs:
+            return refs[cid]
+    return None
+
+
 def generate_frames(workspace: str | Path | None = None) -> dict:
     """阶段 1：为分镜表每个分镜生成首帧图（ComfyUI SDXL 文生图）。
 
     整批工作流一次性提交给 ComfyUI（GPU 队列串行执行），统一收集后
     对失败分镜重试（每轮重新提交）。
+
+    角色一致性（COMFYUI_IPADAPTER 开启且分镜表定义了 characters 时）：
+    先为每个角色生成一张定妆照，出镜分镜的首帧生成通过 IPAdapter
+    注入该参考；带参考失败的分镜在重试轮自动降级为无参考。
     """
     ws = workspace_root(workspace)
     try:
         shots = load_storyboard(ws / STORYBOARD_FILE)
     except StoryboardError as exc:
         return {"stage": "frames", "error": str(exc)}
+    characters: dict[int, Character] = {}
+    if ipadapter_enabled():
+        try:
+            characters = load_characters(ws / STORYBOARD_FILE)
+        except StoryboardError as exc:
+            return {"stage": "frames", "error": str(exc)}
 
     def dest_of(shot: Shot) -> Path:
         return ws / FRAMES_DIR / f"shot_{shot.id}.png"
@@ -165,19 +235,37 @@ def generate_frames(workspace: str | Path | None = None) -> dict:
 
     if pending:
         with ComfyUIClient() as client:
+            refs: dict[int, dict] = {}
+            if characters:
+                refs = _prepare_character_refs(ws, characters, client)
+                if not refs:
+                    logger.warning("frames: 没有可用的角色参考图，全部按无参考生成")
+            shot_by_id = {s.id: s for s in shots}
+            # 带参考失败过的分镜：重试轮降级为无参考（IPAdapter 节点/
+            # 模型未装好时自动回到纯文生图，流水线不中断）
+            degraded: set[int] = set()
+
+            def make_workflow(shot: Shot) -> dict:
+                reference = None if shot.id in degraded else _shot_reference(shot, refs)
+                return build_t2i_workflow(prompt=shot.image_prompt, reference=reference)
+
             for attempt in range(_retries() + 1):
                 if not pending:
                     break
                 if attempt:
                     logger.info("frames: 第 %d 次重试 %d 个分镜", attempt, len(pending))
                 batch_ok, batch_errors, pending = _batch_run(
-                    pending,
-                    lambda shot: build_t2i_workflow(prompt=shot.image_prompt),
-                    dest_of,
-                    client,
+                    pending, make_workflow, dest_of, client
                 )
                 ok.update(batch_ok)
                 errors.update(batch_errors)
+                for sid in batch_errors:
+                    if sid not in degraded and _shot_reference(shot_by_id[sid], refs):
+                        degraded.add(sid)
+                        logger.warning(
+                            "frames: 分镜 %s 带参考生成失败，重试时降级为无参考",
+                            sid,
+                        )
                 if batch_ok:
                     logger.info("frames: 本批成功 %d / 失败 %d",
                                 len(batch_ok), len(batch_errors))

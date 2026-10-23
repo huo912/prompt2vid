@@ -7,6 +7,7 @@ import json
 from prompt2vid.comfyui_client import (
     build_i2v_workflow,
     build_t2i_workflow,
+    ipadapter_enabled,
 )
 
 
@@ -80,5 +81,63 @@ def test_workflows_are_json_serializable():
     for wf in (
         build_t2i_workflow("a", "b"),
         build_i2v_workflow("x.png", "a", "b"),
+        build_t2i_workflow("a", reference={"image_name": "ref.png"}),
     ):
         json.dumps(wf)  # 不抛异常即可
+
+
+# ------------------------------------------------------------ IPAdapter 参考注入
+
+def test_t2i_workflow_without_reference_unchanged():
+    """无参考时与原工作流完全一致（向后兼容）。"""
+    wf = build_t2i_workflow(prompt="a", seed=1)
+    assert not any(key.startswith("ref_") for key in wf)
+    assert wf["3"]["inputs"]["model"] == ["44", 0]
+
+
+def test_t2i_workflow_with_reference():
+    wf = build_t2i_workflow(
+        prompt="a",
+        seed=1,
+        reference={
+            "image_name": "character_ref_1.png",
+            "weight": 0.9,
+            "preset": "PLUS FACE (portraits)",
+        },
+    )
+    assert wf["ref_image"]["class_type"] == "LoadImage"
+    assert wf["ref_image"]["inputs"]["image"] == "character_ref_1.png"
+    assert wf["ref_loader"]["class_type"] == "IPAdapterUnifiedLoader"
+    assert wf["ref_loader"]["inputs"]["ipadapter"] == "PLUS FACE (portraits)"
+    assert wf["ref_loader"]["inputs"]["model"] == ["44", 0]
+    assert wf["ref_apply"]["class_type"] == "IPAdapter"
+    assert wf["ref_apply"]["inputs"]["weight"] == 0.9
+    assert wf["ref_apply"]["inputs"]["image"] == ["ref_image", 0]
+    assert wf["ref_apply"]["inputs"]["model"] == ["ref_loader", 0]
+    # KSampler 的 model 改接 adapter 输出，其余连线不变
+    assert wf["3"]["inputs"]["model"] == ["ref_apply", 0]
+    assert wf["8"]["inputs"]["samples"] == ["3", 0]
+    assert wf["9"]["inputs"]["images"] == ["8", 0]
+
+
+def test_t2i_workflow_reference_defaults_from_env(monkeypatch):
+    monkeypatch.setenv("COMFYUI_IPADAPTER_PRESET", "FACEID PLUS v2")
+    monkeypatch.setenv("COMFYUI_IPADAPTER_WEIGHT", "0.6")
+    wf = build_t2i_workflow(prompt="a", reference={"image_name": "ref.png"})
+    assert wf["ref_loader"]["inputs"]["ipadapter"] == "FACEID PLUS v2"
+    assert wf["ref_apply"]["inputs"]["weight"] == 0.6
+
+
+def test_t2i_workflow_empty_reference_ignored():
+    """reference 缺 image_name 时不注入（生成阶段失败回退的防御）。"""
+    wf = build_t2i_workflow(prompt="a", reference={"image_name": ""})
+    assert not any(key.startswith("ref_") for key in wf)
+
+
+def test_ipadapter_enabled(monkeypatch):
+    for value in ("1", "true", "YES", "on"):
+        monkeypatch.setenv("COMFYUI_IPADAPTER", value)
+        assert ipadapter_enabled() is True
+    for value in ("", "0", "false", "off"):
+        monkeypatch.setenv("COMFYUI_IPADAPTER", value)
+        assert ipadapter_enabled() is False

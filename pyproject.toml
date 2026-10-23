@@ -25,9 +25,10 @@ dev = ["pytest>=8.0"]
 
 [project.scripts]
 prompt2vid = "prompt2vid.main:main"
+prompt2vid-server = "prompt2vid.server:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.setuptools.package-data]
-prompt2vid = ["agent-card.json"]
+prompt2vid = ["agent-card.json", "web/*"]
