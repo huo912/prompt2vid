@@ -1,8 +1,9 @@
 publish_douyin:
   description: >-
     将通过质检的成片发布到抖音。
-    前置检查：读取 report/quality_report.json，仅当 passed=true 才继续，
-    否则如实报告"质检未通过，不发布"并结束。
+    前置检查：用 read_json 文件工具读取工作目录的 report/quality_report.json，
+    仅当 passed=true 才继续，否则如实报告"质检未通过，不发布"并结束
+    （不要凭记忆判断，必须真实读取文件）。
     发布流程：
     1. 根据需求与剧本撰写抖音标题（≤ 30 字）与 3-5 个话题标签（#开头）；
     2. 调用抖音发布工具（publish）：传入 final/final.mp4 路径、标题、标签；

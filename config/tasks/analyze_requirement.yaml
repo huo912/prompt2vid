@@ -1,8 +1,9 @@
 analyze_requirement:
   description: >-
     解析用户的一句话视频描述，产出结构化需求文档。
-    输入：用户原始描述。
-    输出：将以下 JSON 写入工作目录的 requirement.json 文件（使用文件工具），
+    用户原始描述：{user_prompt}
+    输出：将以下 JSON 写入工作目录的 requirement.json 文件（使用 write_json
+    文件工具，相对路径即可，工具会自动落到工作目录），
     并在最终回答中给出同样的 JSON 内容：
     {
       "topic": "主题",
@@ -15,8 +16,10 @@ analyze_requirement:
       "acceptance_criteria": ["验收标准1", "验收标准2"]
     }
     要求：duration_seconds 必须在 15-30 之间；key_elements 至少 3 个；
-    所有字段必须基于用户描述推导，不得虚构与描述无关的内容。
+    所有字段必须基于用户描述推导，不得虚构与描述无关的内容；
+    必须真实调用 write_json 工具把 JSON 写入 requirement.json。
   expected_output: >-
-    一个 JSON 对象（已写入 requirement.json），包含 topic、style、audience、
-    duration_seconds、aspect_ratio、key_elements、tone、acceptance_criteria 字段。
+    一个 JSON 对象（已通过文件工具写入 requirement.json），包含 topic、
+    style、audience、duration_seconds、aspect_ratio、key_elements、tone、
+    acceptance_criteria 字段。
   agent: requirement_analyst

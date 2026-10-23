@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      # 渲染/质检集成测试需要 ffmpeg + ffprobe（本地缺 ffmpeg 的环境会 skip）
+      - name: Install ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
+
+      # 烧录中文字幕需要 CJK 字体
+      - name: Install CJK fonts
+        run: sudo apt-get install -y --no-install-recommends fonts-noto-cjk
+
+      - name: Install package
+        run: pip install -e ".[dev]"
+
+      - name: Run tests
+        env:
+          PROMPT2VID_LLM_API_KEY: sk-test-dummy
+        run: pytest tests/ -v

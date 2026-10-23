@@ -1,8 +1,9 @@
 write_script:
   description: >-
     根据需求文档（requirement.json）撰写短视频剧本。
-    输入：requirement.json 的内容。
-    输出：将剧本写入 script.md（使用文件工具），并在最终回答中给出剧本全文。
+    输入：requirement.json 的内容（如未看到，用 read_json 文件工具读取）。
+    输出：将剧本写入 script.md（使用 write_text 文件工具，相对路径即可，
+    工具会自动落到工作目录），并在最终回答中给出剧本全文。
     剧本结构：
     # 标题
     ## 整体叙事

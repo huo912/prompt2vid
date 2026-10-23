@@ -1,18 +1,15 @@
 generate_videos:
   description: >-
     将每个分镜的首帧图转化为视频片段。
-    使用 ComfyUI 图生视频工具（image_to_video），逐镜调用：
-    - 首帧图使用 frames/manifest.json 中该分镜的图片路径（先上传到 ComfyUI）；
-    - 正向提示词使用分镜的 image_prompt + " " + motion_prompt；
-    - 负向提示词使用环境默认（COMFYUI_LTX_NEGATIVE_PROMPT）；
-    - 时长按分镜 duration_seconds 换算帧数（帧数 = 秒 × 8 + 1，向上取整到 8 的倍数 +1）；
-    - 输出保存到工作目录 clips/ 下，文件名 shot_<id>.webm。
-    全部生成完成后，将结果清单写入 clips/manifest.json：
-    {"shots": [{"id": 1, "video": "clips/shot_1.webm"}, ...]}
-    并在最终回答中给出清单 JSON。
-    要求：每个分镜必须真实调用工具；失败重试最多 2 次；
-    清单中的路径必须是工具真实返回的路径，绝不编造。
+    直接调用 generate_clips 工具（无需任何参数）：该工具会自动读取
+    工作目录的 frames/manifest.json 与 storyboard.json，逐镜调用
+    ComfyUI LTX-Video 图生视频（正向提示词 = image_prompt + motion_prompt，
+    帧数按时长自动换算并满足 8n+1 约束，输出 clips/shot_<id>.webm），
+    失败自动重试，并把真实结果清单写入 clips/manifest.json。
+    调用完成后，把工具返回的 JSON 汇总原样作为你的最终回答，
+    可附一句简短结论（如失败分镜及原因）。
+    不要自己逐镜调用工具，不要手工编写 manifest。
   expected_output: >-
-    clips/ 目录下每个分镜一个视频片段，以及 clips/manifest.json 结果清单
-    （含每个分镜的真实视频路径）。
+    generate_clips 工具返回的 JSON 汇总：stage、total、succeeded、
+    failed、manifest（clips/manifest.json）及失败分镜明细。
   agent: video_generator

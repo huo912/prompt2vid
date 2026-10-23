@@ -28,24 +28,41 @@ flowchart LR
         A7 --> A8["质检师<br/>quality_inspector"]
         A8 --> A9["抖音发布专家<br/>douyin_publisher"]
     end
-    A4 -. "文生图 SDXL" .-> C["ComfyUI (GPU Pod)"]
-    A5 -. "图生视频 LTX-Video" .-> C
+    A4 -. "generate_frames 阶段工具" .-> S["确定性阶段引擎<br/>stages.py"]
+    A5 -. "generate_clips 阶段工具" .-> S
+    A6 -. "generate_voiceovers 阶段工具" .-> S
+    A7 -. "render_final 阶段工具" .-> S
+    A8 -. "run_quality_checks 阶段工具" .-> S
+    S --> C["ComfyUI (GPU)"]
     A9 --> D["抖音开放平台"]
 ```
+
+**LLM 负责创意，代码负责执行**：需求分析 → 剧本 → 分镜由 LLM agent 生成
+（经 file_tool 写入工作目录）；生图、生视频、配音、剪辑、质检五个媒体
+阶段由 agent 调用一次性"阶段工具"（`generate_frames` / `generate_clips` /
+`generate_voiceovers` / `render_final` / `run_quality_checks`），阶段工具
+内部由 `stages.py` 确定性代码**整批提交 ComfyUI**（GPU 队列连续执行）、
+自动重试、写 manifest——不依赖 LLM 循环调用工具，不受 agent 迭代上限
+约束，也不会编造路径。
+
+两种执行模式（`PROMPT2VID_DIRECT_MEDIA` / CLI `--direct-media`）：
+- **crew 模式**（默认）：9 agent 全流程，A2A/kagent 形态；
+- **直接媒体模式**：LLM 只做创意三阶段 + 发布，媒体阶段由 `pipeline.py`
+  直接驱动 stages——省 6 次 LLM 往返，更快、更省 token、更少故障面。
 
 ### Agent 分工
 
 | # | Agent | 职责 | 主要工具 |
 |---|-------|------|----------|
-| 1 | requirement_analyst 需求分析师 | 解析用户描述，产出结构化视频需求（主题/风格/时长/受众/关键元素） | 无（纯 LLM） |
-| 2 | script_writer 编剧 | 根据需求撰写短视频剧本（旁白文案 + 画面描述） | 无（纯 LLM） |
-| 3 | storyboard_planner 分镜师 | 将剧本拆解为分镜表（每镜：画面描述/图生图 prompt/视频运动描述/时长） | 无（纯 LLM） |
-| 4 | image_generator 图像生成师 | 为每个分镜生成首帧图（ComfyUI SDXL 文生图） | ComfyUITool |
-| 5 | video_generator 视频生成师 | 将首帧图转为视频片段（ComfyUI LTX-Video 图生视频） | ComfyUITool |
-| 6 | voiceover_artist 配音师 | 为剧本生成中文配音（edge-tts），产出每镜音频 | EdgeTTSTool |
-| 7 | video_editor 剪辑师 | ffmpeg 拼接片段、混音、烧录字幕，产出最终成片 | FFmpegTool |
-| 8 | quality_inspector 质检师 | 校验成片存在/时长/音轨/分辨率，输出质检报告 | FileTool |
-| 9 | douyin_publisher 抖音发布专家 | 通过抖音开放平台 API 上传并发布，记录状态到 .douyin/state.json | DouyinTool |
+| 1 | requirement_analyst 需求分析师 | 解析用户描述，产出结构化视频需求（主题/风格/时长/受众/关键元素） | file_tool（写 requirement.json） |
+| 2 | script_writer 编剧 | 根据需求撰写短视频剧本（旁白文案 + 画面描述） | file_tool（写 script.md） |
+| 3 | storyboard_planner 分镜师 | 将剧本拆解为分镜表（每镜：画面描述/图生图 prompt/视频运动描述/时长） | file_tool（写 storyboard.json） |
+| 4 | image_generator 图像生成师 | 发起批量首帧图生成并汇报结果 | generate_frames（阶段工具） |
+| 5 | video_generator 视频生成师 | 发起批量图生视频并汇报结果 | generate_clips（阶段工具） |
+| 6 | voiceover_artist 配音师 | 发起批量中文配音并汇报结果 | generate_voiceovers（阶段工具） |
+| 7 | video_editor 剪辑师 | 发起确定性剪辑（拼接/对齐/字幕/混流）并汇报结果 | render_final + probe |
+| 8 | quality_inspector 质检师 | 发起确定性质检并汇报结论 | run_quality_checks（阶段工具） |
+| 9 | douyin_publisher 抖音发布专家 | 撰写标题标签，通过抖音开放平台 API 上传并发布 | DouyinTool |
 
 ## 项目结构
 
@@ -63,14 +80,22 @@ prompt2vid/
 │   └── kagent/                # kagent BYO Harness 部署清单（v1alpha3）
 ├── output/                    # 运行输出目录（每次运行一个 run_<时间戳> 子目录）
 ├── src/prompt2vid/
-│   ├── crew.py                # Crew 构建（加载 config/ 下 YAML）
+│   ├── crew.py                # Crew 构建（加载 config/ 下 YAML，装配工具）
 │   ├── main.py                # CLI 入口：python -m prompt2vid.main "描述"
 │   ├── server.py              # A2A 服务器（a2a-sdk，kagent 可调用）
-│   ├── dynamic_llm.py         # LLM 配置（支持按 agent 覆盖模型）
+│   ├── pipeline.py            # 流水线编排（crew/直连模式、续跑、清理、run.log）
+│   ├── dynamic_llm.py         # LLM 配置（按 agent 覆盖模型，前缀自动补齐+实例缓存）
+│   ├── preflight.py           # 环境预检（ComfyUI/模型/节点/ffmpeg）
+│   ├── stages.py              # 确定性阶段引擎（批量提交/重试/清单）
+│   ├── storyboard.py          # 分镜表宽松解析与修复
+│   ├── comfyui_client.py      # ComfyUI HTTP 客户端（连接池/退避轮询/批量等待）
+│   ├── tts.py                 # edge-tts 配音纯函数（带回退链）
+│   ├── ffmpeg_ops.py          # ffmpeg 剪辑纯函数（探测/拼接/对齐/SRT/混流）
+│   ├── workspace.py           # 统一工作目录解析
 │   ├── agent-card.json        # A2A Agent Card
 │   ├── agents/                # 9 个 agent 定义（每个一个 .py）
 │   ├── tasks/                 # 任务装配
-│   └── tools/                 # ComfyUI / edge-tts / ffmpeg / 抖音 / 文件工具
+│   └── tools/                 # CrewAI 工具薄包装（阶段工具 + 文件/抖音工具）
 └── tests/                     # 单元测试 + 端到端冒烟测试
 ```
 
@@ -83,12 +108,22 @@ pip install -e .
 # 2. 配置环境变量
 cp .env.example .env   # 填写 LLM API Key、ComfyUI 地址等
 
-# 3. 启动 ComfyUI（本地或 k8s，见下文部署章节）
+# 3. 启动 ComfyUI（本地默认 http://127.0.0.1:8188，模型放置见 [docs/LOCAL_SETUP.md](docs/LOCAL_SETUP.md)）
 
-# 4. 运行
+# 4. 预检环境（ComfyUI 可达、三个模型就位、LTXV 节点、ffmpeg 可用）
+prompt2vid --check-only
+
+# 5. 运行（默认自动预检，配置问题会在启动几秒内报出）
 prompt2vid "做一个关于秋天的治愈系短视频"
-# 或
-python -m prompt2vid.main "做一个关于秋天的治愈系短视频"
+
+# 更快更省 token：直接媒体模式（LLM 只做创意+发布，媒体阶段代码直跑）
+prompt2vid "做一个关于秋天的治愈系短视频" --direct-media
+
+# 断点续跑：已生成的帧/片段/配音自动跳过，只补缺失与后续阶段
+prompt2vid --resume output/run_20260101_120000 --from render --publish
+
+# 清理旧运行目录（保留最近 5 个）与抖音发布历史
+prompt2vid --clean --keep 5
 ```
 
 每次运行会在 `output/run_<时间戳>/` 下产出：`requirement.json`、`script.md`、`storyboard.json`、`frames/`（分镜首帧）、`clips/`（分镜视频）、`audio/`（配音）、`final/`（成片 + 字幕）、`report/`（质检报告）。
@@ -163,6 +198,10 @@ curl -X POST http://<pod-ip>:8081/a2a/jsonrpc \
 
 ## 模型下载与放置
 
+> 本地运行的完整配置手册（模型清单、hf-mirror 下载命令、ffmpeg 安装、
+> 8GB 显存调优）见 **[docs/LOCAL_SETUP.md](docs/LOCAL_SETUP.md)**；
+> k8s 部署的模型下载见 [deploy/comfyui/MODELS.md](deploy/comfyui/MODELS.md)。
+
 | 模型 | 用途 | 放置路径（ComfyUI PVC 内） | 下载 |
 |------|------|--------------------------|------|
 | SDXL Base 1.0 | 分镜首帧文生图 | `models/checkpoints/sd_xl_base_1.0.safetensors` | huggingface.co/stabilityai/stable-diffusion-xl-base-1.0 |
@@ -188,8 +227,15 @@ curl -X POST http://<pod-ip>:8081/a2a/jsonrpc \
 | `PROMPT2VID_MODEL` | 默认 LLM（LiteLLM 格式，如 `openai/gpt-4o-mini`） |
 | `PROMPT2VID_LLM_BASE_URL` / `PROMPT2VID_LLM_API_KEY` | OpenAI 兼容网关地址与密钥 |
 | `PROMPT2VID_MODEL__SCRIPT_WRITER` | 按 agent 覆盖模型（agent 名大写、点换双下划线） |
-| `COMFYUI_URL` | ComfyUI 服务地址 |
+| `COMFYUI_URL` | ComfyUI 服务地址（本地默认 `http://127.0.0.1:8188`） |
 | `COMFYUI_T2I_CHECKPOINT` / `COMFYUI_LTX_CHECKPOINT` / `COMFYUI_T5` | ComfyUI 模型文件名 |
+| `COMFYUI_T2I_STEPS` / `COMFYUI_LTX_STEPS` | 采样步数（默认 25 / 10；LTX 0.9.5 蒸馏版 8-13 步即可） |
+| `COMFYUI_RETRIES` | 单镜生成失败重试次数（默认 2，按批次重试） |
+| `COMFYUI_LTX_FPS` / `COMFYUI_LTX_MAX_FRAMES` | LTX 帧率（25）与单镜帧数上限（121，帧数自动满足 8n+1） |
+| `PROMPT2VID_SEED` | 固定种子复现（逐镜 +1；不设则随机） |
+| `PROMPT2VID_DIRECT_MEDIA` | true 时直接媒体模式（LLM 只做创意+发布） |
+| `PROMPT2VID_BGM` / `PROMPT2VID_BGM_VOLUME` | 可选背景音乐文件与音量（默认 0.25） |
+| `PROMPT2VID_SUBTITLE_STYLE` | 字幕烧录样式（libass force_style） |
 | `DOUYIN_DRY_RUN` | true 时抖音发布仅记录状态 |
 
 ## 测试
@@ -198,6 +244,10 @@ curl -X POST http://<pod-ip>:8081/a2a/jsonrpc \
 pip install -e ".[dev]"
 pytest tests/ -v
 ```
+
+> 本地无 ffmpeg 时渲染/质检集成测试自动 skip；GitHub Actions
+> （[.github/workflows/ci.yml](.github/workflows/ci.yml)）会安装 ffmpeg +
+> CJK 字体跑全量测试。
 
 ## License
 

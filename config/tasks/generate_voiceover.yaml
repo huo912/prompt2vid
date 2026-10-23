@@ -1,16 +1,15 @@
 generate_voiceover:
   description: >-
     为分镜表（storyboard.json）中每个分镜生成中文配音。
-    使用 edge-tts 配音工具（synthesize），逐镜调用：
-    - 文本使用分镜的 narration；
-    - 音色使用 zh-CN-XiaoxiaoNeural（可用环境变量覆盖）；
-    - 输出保存到工作目录 audio/ 下，文件名 shot_<id>.mp3。
-    全部生成完成后，将结果清单写入 audio/manifest.json：
-    {"shots": [{"id": 1, "audio": "audio/shot_1.mp3"}, ...]}
-    并在最终回答中给出清单 JSON。
-    要求：每个分镜必须真实调用工具；失败重试最多 2 次；
-    清单中的路径必须是工具真实返回的路径，绝不编造。
+    直接调用 generate_voiceovers 工具（无需任何参数）：该工具会自动读取
+    工作目录的 storyboard.json，逐镜用 edge-tts 合成中文配音
+    （音色 zh-CN-XiaoxiaoNeural，可用环境变量覆盖；edge-tts 不可用时自动
+    回退），输出 audio/shot_<id>.mp3，并把真实结果清单写入
+    audio/manifest.json。
+    调用完成后，把工具返回的 JSON 汇总原样作为你的最终回答，
+    可附一句简短结论。
+    不要自己逐镜调用工具，不要手工编写 manifest。
   expected_output: >-
-    audio/ 目录下每个分镜一段配音音频，以及 audio/manifest.json 结果清单
-    （含每个分镜的真实音频路径）。
+    generate_voiceovers 工具返回的 JSON 汇总：stage、total、succeeded、
+    failed、manifest（audio/manifest.json）。
   agent: voiceover_artist

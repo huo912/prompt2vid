@@ -13,18 +13,21 @@ from dotenv import load_dotenv
 
 from .dynamic_llm import build_llm
 
-# agent 名 → (agent 模块, tools 属性名列表)
-# tools 属性名对应 agents/<name>.py 中定义的模块级变量
+# agent 名 → 工具模块列表（prompt2vid.tools 下的模块名）
+# 默认取模块的 TOOLS 属性；也可用 "module:ATTR" 语法指定其他导出
+# （如 comfyui_tool:IMAGE_TOOLS 只给图像生成阶段工具）。
+# 注意：创意三阶段（需求/剧本/分镜）需要 file_tool 写 requirement.json /
+# script.md / storyboard.json，此前漏配导致产物从未落盘。
 AGENT_TOOL_ATTRS: dict[str, list[str]] = {
-    "requirement_analyst": [],
-    "script_writer": [],
-    "storyboard_planner": [],
-    "image_generator": ["comfyui_tool"],
-    "video_generator": ["comfyui_tool"],
+    "requirement_analyst": ["file_tool"],
+    "script_writer": ["file_tool"],
+    "storyboard_planner": ["file_tool"],
+    "image_generator": ["comfyui_tool:IMAGE_TOOLS"],
+    "video_generator": ["comfyui_tool:VIDEO_TOOLS"],
     "voiceover_artist": ["tts_tool"],
     "video_editor": ["ffmpeg_tool"],
-    "quality_inspector": ["file_tool"],
-    "douyin_publisher": ["douyin_tool"],
+    "quality_inspector": ["quality_tool"],
+    "douyin_publisher": ["douyin_tool", "file_tool"],
 }
 
 # 流水线顺序（task 名与 config/tasks/*.yaml 顶层键一致）
@@ -96,7 +99,7 @@ def _load_yaml(path: Path) -> dict[str, Any]:
 
 
 def _collect_tools(agent_name: str) -> list:
-    """从 agents/<name>.py 模块收集工具实例。"""
+    """从 tools/<module>.py 收集工具实例（支持 module / module:ATTR 语法）。"""
     if agent_name not in AGENT_TOOL_ATTRS:
         raise KeyError(f"未知 agent: {agent_name}")
     tools: list = []
@@ -104,9 +107,10 @@ def _collect_tools(agent_name: str) -> list:
         return tools
     from importlib import import_module
 
-    for attr in AGENT_TOOL_ATTRS[agent_name]:
-        module = import_module(f"prompt2vid.tools.{attr}")
-        tools.extend(getattr(module, "TOOLS"))
+    for spec in AGENT_TOOL_ATTRS[agent_name]:
+        module_name, _, attr = spec.partition(":")
+        module = import_module(f"prompt2vid.tools.{module_name}")
+        tools.extend(getattr(module, attr or "TOOLS"))
     return tools
 
 
@@ -130,18 +134,30 @@ def build_agents(config_dir: Path) -> dict[str, Agent]:
     return agents
 
 
-def build_tasks(config_dir: Path, agents: dict[str, Agent]) -> list[Task]:
-    """按流水线顺序从 config/tasks/*.yaml 构建 Task 实例。"""
+def build_tasks(
+    config_dir: Path,
+    agents: dict[str, Agent],
+    task_names: list[str] | None = None,
+) -> list[Task]:
+    """按流水线顺序从 config/tasks/*.yaml 构建 Task 实例。
+
+    Args:
+        task_names: 只构建指定任务（直接媒体模式拆分创意/发布两段用）；
+            缺省构建全流程。
+    """
     tasks_dir = config_dir / "tasks"
     specs: dict[str, dict[str, Any]] = {}
     for path in sorted(tasks_dir.glob("*.yaml")):
         name, spec = next(iter(_load_yaml(path).items()))
         specs[name] = spec
 
+    order = task_names if task_names is not None else TASK_ORDER
+    unknown = [name for name in order if name not in specs]
+    if unknown:
+        raise ValueError(f"未知任务: {unknown}（可选: {', '.join(TASK_ORDER)}）")
+
     tasks: list[Task] = []
-    for name in TASK_ORDER:
-        if name not in specs:
-            raise ValueError(f"缺少任务配置: config/tasks/{name}.yaml")
+    for name in order:
         spec = specs[name]
         agent_name = spec["agent"]
         if agent_name not in agents:
@@ -156,15 +172,21 @@ def build_tasks(config_dir: Path, agents: dict[str, Agent]) -> list[Task]:
     return tasks
 
 
-def build_crew() -> Crew:
-    """构建完整流水线 Crew。"""
+def build_crew(task_names: list[str] | None = None) -> Crew:
+    """构建流水线 Crew。
+
+    Args:
+        task_names: 只包含指定任务（用于直接媒体模式分段执行）；
+            缺省构建全流程（9 任务）。
+    """
     load_dotenv()
     _bypass_proxy_for_internal_hosts()
     config_dir = _find_config_dir()
     agents = build_agents(config_dir)
-    tasks = build_tasks(config_dir, agents)
+    tasks = build_tasks(config_dir, agents, task_names)
+    used_agents = list(dict.fromkeys(task.agent for task in tasks))
     return Crew(
-        agents=list(agents.values()),
+        agents=used_agents,
         tasks=tasks,
         process=Process.sequential,
         verbose=True,

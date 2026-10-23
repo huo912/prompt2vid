@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-from prompt2vid.tools.comfyui_tool import (
+from prompt2vid.comfyui_client import (
     build_i2v_workflow,
     build_t2i_workflow,
 )
@@ -72,6 +72,8 @@ def test_i2v_workflow_structure():
     assert i2v_inputs["image"] == ["82", 0]
     # 首帧图上传名
     assert wf["78"]["inputs"]["image"] == "shot_1.png"
+    # 帧率一致性：LTXVConditioning 与 SaveWEBM 都用 25fps
+    assert wf["69"]["inputs"]["frame_rate"] == wf["86"]["inputs"]["fps"] == 25.0
 
 
 def test_workflows_are_json_serializable():

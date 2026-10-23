@@ -1,15 +1,18 @@
 edit_video:
   description: >-
     将所有素材合成为最终成片。
-    使用 ffmpeg 剪辑工具，按顺序执行：
-    1. assemble：按 clips/manifest.json 顺序拼接所有分镜片段 → final/merged.mp4；
-    2. mix_audio：按 audio/manifest.json 顺序拼接所有配音 → final/voiceover.mp3
-       （每段配音时长对齐到对应分镜时长，不足则静音填充）；
-    3. mux：将 merged.mp4 与 voiceover.mp3 混流 → final/video_with_audio.mp4；
-    4. burn_subtitles：根据 storyboard.json 的旁白生成 SRT 字幕并烧录 → final/final.mp4。
-    完成后用 ffprobe 验证成片时长、分辨率、音轨，并在最终回答中报告验证结果。
-    要求：每步必须真实调用工具并检查返回；素材缺失时如实报告失败，绝不编造。
+    直接调用 render_final 工具（无需任何参数）：该工具会自动读取工作目录
+    的 clips/manifest.json、audio/manifest.json 与 storyboard.json，
+    确定性地完成：
+    1. 逐镜探测真实时长并把配音对齐到该时长（不足静音填充）；
+    2. 按分镜顺序拼接视频片段；
+    3. 按真实时间轴生成 SRT 中文字幕；
+    4. 混流音轨并烧录字幕，产出 final/final.mp4 与 final/render_report.json。
+    调用完成后，把工具返回的 JSON 汇总（成片路径、时长、分辨率、音轨）
+    原样作为你的最终回答，可附一句简短结论。
+    如需补充核验，可调用 probe 工具探测 final/final.mp4。
+    不要自己分步调用 ffmpeg 工具，不要手工生成字幕时间轴。
   expected_output: >-
-    final/final.mp4 最终成片（已拼接、混音、烧录字幕），
-    以及剪辑验证结果（时长/分辨率/音轨信息）。
+    render_final 工具返回的 JSON 汇总：final_video、duration_seconds、
+    width、height、has_audio、shots。
   agent: video_editor

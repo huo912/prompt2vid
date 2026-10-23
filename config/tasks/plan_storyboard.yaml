@@ -1,8 +1,9 @@
 plan_storyboard:
   description: >-
     将剧本（script.md）拆解为分镜表。
-    输入：script.md 的内容。
-    输出：将分镜表写入 storyboard.json（使用文件工具），并在最终回答中给出 JSON。
+    输入：script.md 的内容（如未看到，用 read_text 文件工具读取）。
+    输出：将分镜表写入 storyboard.json（使用 write_json 文件工具，
+    相对路径即可，工具会自动落到工作目录），并在最终回答中给出同样的 JSON。
     分镜表结构：
     {
       "shots": [
@@ -20,9 +21,14 @@ plan_storyboard:
     要求：
     1. image_prompt 必须为英文、具体、含统一风格后缀（保持全片风格一致）；
     2. motion_prompt 必须为英文、只描述镜头内运动（推拉摇移、元素运动）；
-    3. duration_seconds 每镜 3-5 秒（LTX 生成预算），总和等于需求时长；
-    4. narration 与剧本逐镜文案一致。
+    3. duration_seconds 每镜 3-5 秒（LTX 生成预算），总和等于需求时长，
+       镜头数控制在 4-8 个；
+    4. narration 与剧本逐镜文案一致；
+    5. id 从 1 开始连续编号；
+    6. 必须真实调用 write_json 工具把分镜表写入 storyboard.json
+       （下游所有生成环节都从这个文件读取）。
   expected_output: >-
-    一个 JSON 分镜表（已写入 storyboard.json），shots 数组每项含 id、narration、
-    visual、image_prompt、motion_prompt、duration_seconds。
+    一个 JSON 分镜表（已通过文件工具写入 storyboard.json），shots 数组
+    每项含 id、narration、visual、image_prompt、motion_prompt、
+    duration_seconds，以及 total_duration_seconds。
   agent: storyboard_planner

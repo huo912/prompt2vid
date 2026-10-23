@@ -1,0 +1,537 @@
+"""确定性阶段引擎：把"循环 + 重试 + 清单"从 LLM 手里下沉到代码。
+
+此前每个媒体 agent 需要自己逐镜循环调用工具、维护 manifest.json，
+受 max_iter 限制（镜头一多就截断）、易编造路径、慢且贵。现在每个阶段
+是一个无参数的确定性函数：自动从工作目录读取上一步产物，逐镜执行、
+失败重试、写清单、返回 JSON 汇总。LLM agent 只负责调用一次阶段工具
+并把汇总汇报给下游。
+
+阶段产物契约（均位于工作目录）：
+- storyboard.json  分镜表（分镜师产出，storyboard.load_storyboard 解析）
+- frames/manifest.json  {"shots": [{"id", "image", "status", "error", "path"}]}
+- clips/manifest.json   {"shots": [{"id", "video", "status", "error", "path", "length"}]}
+- audio/manifest.json   {"shots": [{"id", "audio", "status", "path"}]}
+- final/final.mp4 + final/final.srt + final/render_report.json
+- report/quality_report.json
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import math
+from pathlib import Path
+from typing import Any, Callable
+
+from . import ffmpeg_ops, tts
+from .comfyui_client import (
+    ComfyUITaskError,
+    ComfyUIClient,
+    build_i2v_workflow,
+    build_t2i_workflow,
+    env_int,
+    env_str,
+)
+from .storyboard import Shot, StoryboardError, extract_json, load_storyboard, read_manifest
+from .workspace import resolve_in_workspace, workspace_root
+
+logger = logging.getLogger("prompt2vid.stages")
+
+STORYBOARD_FILE = "storyboard.json"
+REQUIREMENT_FILE = "requirement.json"
+FRAMES_DIR = "frames"
+CLIPS_DIR = "clips"
+AUDIO_DIR = "audio"
+FINAL_DIR = "final"
+REPORT_DIR = "report"
+
+# LTX 帧数约束：length = 8n+1；帧率与上限可配
+DEFAULT_LTX_FPS = 25
+DEFAULT_LTX_MAX_FRAMES = 121
+MIN_FRAMES = 9  # 8*1+1
+
+
+def frames_for_duration(seconds: float) -> int:
+    """把每镜时长换算为 LTX 帧数（8n+1，且不超过显存预算上限）。"""
+    fps = env_int("COMFYUI_LTX_FPS", DEFAULT_LTX_FPS)
+    max_frames = max(MIN_FRAMES, env_int("COMFYUI_LTX_MAX_FRAMES", DEFAULT_LTX_MAX_FRAMES))
+    target = max(MIN_FRAMES, math.ceil(seconds * fps))
+    length = 8 * math.ceil((target - 1) / 8) + 1
+    if length > max_frames:
+        length = 8 * ((max_frames - 1) // 8) + 1
+    return max(MIN_FRAMES, length)
+
+
+def _retries() -> int:
+    return max(0, env_int("COMFYUI_RETRIES", 2))
+
+
+def _batch_run(
+    jobs: list[Shot],
+    make_workflow: Callable[[Shot], dict],
+    dest_of: Callable[[Shot], Path],
+    client: ComfyUIClient,
+) -> tuple[dict[int, Path], dict[int, str], list[Shot]]:
+    """把一批分镜的工作流一次性提交给 ComfyUI 并统一等待收集。
+
+    ComfyUI 自带 GPU 执行队列：整批提交后串行执行，省掉逐镜
+    "提交→轮询→下载"的调度空隙。返回 (成功 id→路径, 失败 id→错误,
+    需重试分镜)。单个任务失败不影响同批其他任务。
+    """
+    ok: dict[int, Path] = {}
+    errors: dict[int, str] = {}
+    retry: list[Shot] = []
+    prompt_ids: dict[str, Shot] = {}
+
+    for shot in jobs:
+        try:
+            pid = client.submit(make_workflow(shot))
+            prompt_ids[pid] = shot
+        except Exception as exc:  # noqa: BLE001 - 提交失败进入本批重试
+            errors[shot.id] = str(exc)
+            retry.append(shot)
+
+    results = client.wait_all(list(prompt_ids)) if prompt_ids else {}
+    for pid, shot in prompt_ids.items():
+        entry = results[pid]
+        if isinstance(entry, ComfyUITaskError):
+            errors[shot.id] = str(entry)
+            retry.append(shot)
+            continue
+        files = client.outputs(entry)
+        if not files:
+            errors[shot.id] = "任务完成但没有输出文件"
+            retry.append(shot)
+            continue
+        try:
+            ok[shot.id] = client.download(files[0], dest_of(shot))
+        except Exception as exc:  # noqa: BLE001 - 下载失败进入本批重试
+            errors[shot.id] = str(exc)
+            retry.append(shot)
+    return ok, errors, retry
+
+
+def _write_json(path: Path, data: dict) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    return path
+
+
+def _summary(stage: str, entries: list[dict], manifest_rel: str) -> dict:
+    ok = [e for e in entries if e.get("status") == "ok"]
+    failed = [e for e in entries if e.get("status") != "ok"]
+    summary: dict[str, Any] = {
+        "stage": stage,
+        "total": len(entries),
+        "succeeded": len(ok),
+        "failed": len(failed),
+        "manifest": manifest_rel,
+    }
+    if failed:
+        summary["failed_shots"] = [
+            {"id": e["id"], "error": e.get("error", "")} for e in failed
+        ]
+        if not ok:
+            summary["error"] = f"全部 {len(entries)} 个分镜都失败，请检查 ComfyUI 与模型配置"
+    return summary
+
+
+def generate_frames(workspace: str | Path | None = None) -> dict:
+    """阶段 1：为分镜表每个分镜生成首帧图（ComfyUI SDXL 文生图）。
+
+    整批工作流一次性提交给 ComfyUI（GPU 队列串行执行），统一收集后
+    对失败分镜重试（每轮重新提交）。
+    """
+    ws = workspace_root(workspace)
+    try:
+        shots = load_storyboard(ws / STORYBOARD_FILE)
+    except StoryboardError as exc:
+        return {"stage": "frames", "error": str(exc)}
+
+    def dest_of(shot: Shot) -> Path:
+        return ws / FRAMES_DIR / f"shot_{shot.id}.png"
+
+    entries: list[dict] = []
+    ok: dict[int, Path] = {}
+    errors: dict[int, str] = {}
+    pending: list[Shot] = []
+    for shot in shots:
+        dest = dest_of(shot)
+        # 已存在且非空的图跳过（断点续跑）
+        if dest.is_file() and dest.stat().st_size > 0:
+            ok[shot.id] = dest
+        else:
+            pending.append(shot)
+
+    if pending:
+        with ComfyUIClient() as client:
+            for attempt in range(_retries() + 1):
+                if not pending:
+                    break
+                if attempt:
+                    logger.info("frames: 第 %d 次重试 %d 个分镜", attempt, len(pending))
+                batch_ok, batch_errors, pending = _batch_run(
+                    pending,
+                    lambda shot: build_t2i_workflow(prompt=shot.image_prompt),
+                    dest_of,
+                    client,
+                )
+                ok.update(batch_ok)
+                errors.update(batch_errors)
+                if batch_ok:
+                    logger.info("frames: 本批成功 %d / 失败 %d",
+                                len(batch_ok), len(batch_errors))
+
+    for shot in shots:
+        if shot.id in ok:
+            entries.append(_ok_entry(shot.id, "image", f"{FRAMES_DIR}/shot_{shot.id}.png", ok[shot.id]))
+        else:
+            entries.append(_failed_entry(shot.id, errors.get(shot.id, "未生成")))
+
+    manifest_rel = f"{FRAMES_DIR}/manifest.json"
+    _write_json(ws / manifest_rel, {"shots": entries})
+    return _summary("frames", entries, manifest_rel)
+
+
+def generate_clips(workspace: str | Path | None = None) -> dict:
+    """阶段 2：把每个首帧图转为视频片段（ComfyUI LTX-Video 图生视频）。
+
+    首帧图先逐个上传，然后整批工作流一次性提交给 ComfyUI，统一收集后
+    对失败分镜重试。
+    """
+    ws = workspace_root(workspace)
+    try:
+        storyboard = {s.id: s for s in load_storyboard(ws / STORYBOARD_FILE)}
+    except StoryboardError as exc:
+        return {"stage": "clips", "error": str(exc)}
+    try:
+        frames = read_manifest(ws / FRAMES_DIR / "manifest.json")
+    except (FileNotFoundError, ValueError) as exc:
+        return {"stage": "clips", "error": f"请先生成首帧图: {exc}"}
+
+    image_of: dict[int, Path] = {}
+    for frame in frames:
+        if frame.get("status") != "ok":
+            continue
+        shot_id = int(frame.get("id", 0))
+        if shot_id in storyboard:
+            image_of[shot_id] = resolve_in_workspace(frame.get("path", ""), ws)
+
+    def dest_of(shot: Shot) -> Path:
+        return ws / CLIPS_DIR / f"shot_{shot.id}.webm"
+
+    ok: dict[int, Path] = {}
+    lengths: dict[int, int] = {}
+    errors: dict[int, str] = {}
+    pending: list[Shot] = []
+    for shot in storyboard.values():
+        dest = dest_of(shot)
+        if shot.id not in image_of:
+            continue  # 首帧图缺失的分镜直接不进清单
+        if dest.is_file() and dest.stat().st_size > 0:
+            ok[shot.id] = dest  # 断点续跑
+            lengths[shot.id] = frames_for_duration(shot.duration_seconds)
+        else:
+            pending.append(shot)
+
+    if pending:
+        with ComfyUIClient() as client:
+            for attempt in range(_retries() + 1):
+                if not pending:
+                    break
+                if attempt:
+                    logger.info("clips: 第 %d 次重试 %d 个分镜", attempt, len(pending))
+
+                def make_workflow(shot: Shot) -> dict:
+                    # 上传在提交前串行完成；失败会作为该镜本轮错误进入重试
+                    uploaded = client.upload_image(image_of[shot.id])
+                    length = frames_for_duration(shot.duration_seconds)
+                    lengths[shot.id] = length
+                    prompt = f"{shot.image_prompt} {shot.motion_prompt}".strip()
+                    return build_i2v_workflow(image_name=uploaded, prompt=prompt, length=length)
+
+                batch_ok, batch_errors, pending = _batch_run(
+                    pending, make_workflow, dest_of, client
+                )
+                ok.update(batch_ok)
+                errors.update(batch_errors)
+                if batch_ok:
+                    logger.info("clips: 本批成功 %d / 失败 %d",
+                                len(batch_ok), len(batch_errors))
+
+    entries: list[dict] = []
+    for shot in sorted(storyboard.values(), key=lambda s: s.id):
+        if shot.id in ok:
+            entry = _ok_entry(shot.id, "video", f"{CLIPS_DIR}/shot_{shot.id}.webm", ok[shot.id])
+            entry["length"] = lengths.get(shot.id)
+            entries.append(entry)
+        elif shot.id in errors:
+            entries.append(_failed_entry(shot.id, errors[shot.id]))
+
+    manifest_rel = f"{CLIPS_DIR}/manifest.json"
+    _write_json(ws / manifest_rel, {"shots": entries})
+    return _summary("clips", entries, manifest_rel)
+
+
+def generate_voiceovers(workspace: str | Path | None = None) -> dict:
+    """阶段 3：为每个分镜生成中文配音（edge-tts，失败自动回退）。"""
+    ws = workspace_root(workspace)
+    try:
+        shots = load_storyboard(ws / STORYBOARD_FILE)
+    except StoryboardError as exc:
+        return {"stage": "voiceovers", "error": str(exc)}
+
+    entries: list[dict] = []
+    for shot in shots:
+        dest = ws / AUDIO_DIR / f"shot_{shot.id}.mp3"
+        if dest.is_file() and dest.stat().st_size > 0:
+            entries.append(_ok_entry(shot.id, "audio", f"{AUDIO_DIR}/shot_{shot.id}.mp3", dest))
+            continue
+        try:
+            path = tts.synthesize_audio(text=shot.narration or "。", dest=dest)
+            entries.append(_ok_entry(shot.id, "audio", f"{AUDIO_DIR}/shot_{shot.id}.mp3", path))
+        except Exception as exc:  # noqa: BLE001 - TTS 已有静音回退，此处兜底
+            entries.append(_failed_entry(shot.id, str(exc)))
+
+    manifest_rel = f"{AUDIO_DIR}/manifest.json"
+    _write_json(ws / manifest_rel, {"shots": entries})
+    return _summary("voiceovers", entries, manifest_rel)
+
+
+def _bgm_path() -> Path | None:
+    """可选背景音乐（PROMPT2VID_BGM 指向音频文件时启用，循环低音量混入）。"""
+    raw = env_str("PROMPT2VID_BGM", "")
+    if not raw:
+        return None
+    path = Path(raw)
+    return path if path.is_file() else None
+
+
+def render_final(workspace: str | Path | None = None) -> dict:
+    """阶段 4：确定性剪辑——拼接、逐镜音频对齐、SRT 字幕、混流烧录。
+
+    字幕时间轴与音轨时长都基于每个片段的真实时长（ffprobe 探测），
+    不依赖 LLM 手写时间轴。
+    """
+    ws = workspace_root(workspace)
+    try:
+        clips = read_manifest(ws / CLIPS_DIR / "manifest.json")
+    except (FileNotFoundError, ValueError) as exc:
+        return {"stage": "render", "error": f"缺少视频片段清单: {exc}"}
+    try:
+        audios = {
+            int(a.get("id", 0)): resolve_in_workspace(a.get("path", a.get("audio", "")), ws)
+            for a in read_manifest(ws / AUDIO_DIR / "manifest.json")
+            if a.get("status") in (None, "ok")
+        }
+    except (FileNotFoundError, ValueError):
+        audios = {}
+    try:
+        storyboard = {s.id: s for s in load_storyboard(ws / STORYBOARD_FILE)}
+    except StoryboardError:
+        storyboard = {}
+
+    ok_clips = [c for c in clips if c.get("status") == "ok"]
+    ok_clips.sort(key=lambda c: int(c.get("id", 0)))
+    if not ok_clips:
+        return {"stage": "render", "error": "没有可用的视频片段，无法剪辑"}
+
+    work_dir = ws / FINAL_DIR / "work"
+    work_dir.mkdir(parents=True, exist_ok=True)
+
+    # 1. 逐镜：探测真实时长 → 配音超长时延长视频（定格末帧）而非截断配音 →
+    #    音频对齐到该时长（响度归一）→ 规范化转码
+    normalized: list[Path] = []
+    fitted_audio: list[Path] = []
+    timings: list[tuple[float, float, str]] = []
+    audio_overruns: list[dict] = []
+    cursor = 0.0
+    for clip in ok_clips:
+        shot_id = int(clip.get("id", 0))
+        clip_path = resolve_in_workspace(clip.get("path", clip.get("video", "")), ws)
+        try:
+            duration = ffmpeg_ops.probe_file(clip_path)["duration_seconds"]
+        except (FileNotFoundError, RuntimeError) as exc:
+            return {"stage": "render", "error": f"探测片段 {clip_path} 失败: {exc}"}
+        duration = max(0.1, duration)
+
+        # 配音真实时长（探测失败按缺失处理）
+        audio_path = audios.get(shot_id)
+        audio_duration = 0.0
+        if audio_path is not None and audio_path.is_file():
+            try:
+                audio_duration = ffmpeg_ops.probe_file(audio_path)["duration_seconds"]
+            except (RuntimeError, FileNotFoundError):
+                audio_duration = 0.0
+
+        # 配音比片段长 → 用定格末帧延长视频，保证旁白不被截断
+        effective = max(duration, audio_duration)
+        extend = effective - duration
+        if extend > 0.3:
+            logger.info(
+                "render: 分镜 %d 配音 %.1fs 超过片段 %.1fs，定格延长 %.1fs",
+                shot_id, audio_duration, duration, extend,
+            )
+            audio_overruns.append(
+                {
+                    "id": shot_id,
+                    "clip_seconds": round(duration, 2),
+                    "audio_seconds": round(audio_duration, 2),
+                    "extended_seconds": round(extend, 2),
+                }
+            )
+
+        fitted = ffmpeg_ops.fit_audio(
+            audio_path, effective, work_dir / f"audio_{shot_id}.wav"
+        )
+        fitted_audio.append(fitted)
+
+        norm = ffmpeg_ops.normalize_clip(
+            clip_path, work_dir / f"clip_{shot_id}.mp4", extend_seconds=extend
+        )
+        normalized.append(norm)
+
+        shot = storyboard.get(shot_id)
+        narration = shot.narration if shot else ""
+        if narration:
+            timings.append((cursor, cursor + effective, narration))
+        cursor += effective
+
+    # 2. 拼接视频与音轨
+    merged = ffmpeg_ops.concat_media(normalized, ws / FINAL_DIR / "merged.mp4")
+    voiceover = ffmpeg_ops.concat_media(
+        fitted_audio, ws / FINAL_DIR / "voiceover.wav", reencode_audio=True
+    )
+
+    # 3. SRT 字幕（基于真实时间轴）
+    srt = None
+    if timings:
+        srt = ffmpeg_ops.build_srt(timings, ws / FINAL_DIR / "final.srt")
+
+    # 4. 混流 + 烧录字幕一步完成（可选 BGM 背景音乐）
+    bgm = _bgm_path()
+    final = ffmpeg_ops.mux_and_burn(
+        merged, voiceover, srt, ws / FINAL_DIR / "final.mp4", bgm=bgm
+    )
+
+    probe = ffmpeg_ops.probe_file(final)
+    report = {
+        "stage": "render",
+        "final_video": str(final.resolve()),
+        "srt": str(srt.resolve()) if srt else None,
+        "bgm": str(bgm) if bgm else None,
+        "duration_seconds": probe["duration_seconds"],
+        "width": probe["width"],
+        "height": probe["height"],
+        "has_audio": probe["has_audio"],
+        "audio_overruns": audio_overruns,
+        "shots": [
+            {"id": int(c.get("id", 0)), "video": c.get("video", c.get("path", ""))}
+            for c in ok_clips
+        ],
+    }
+    _write_json(ws / FINAL_DIR / "render_report.json", report)
+    return report
+
+
+def run_quality_checks(workspace: str | Path | None = None) -> dict:
+    """阶段 5：质检——成片存在/时长/分辨率/音轨 + 分镜产物齐全。"""
+    ws = workspace_root(workspace)
+    final = ws / FINAL_DIR / "final.mp4"
+
+    checks: list[dict] = []
+
+    def add(name: str, passed: bool, detail: str) -> None:
+        checks.append({"name": name, "passed": passed, "detail": detail})
+
+    final_exists = final.is_file() and final.stat().st_size > 0
+    add("final_video_exists", final_exists, str(final.resolve()))
+
+    duration = 0.0
+    probe: dict = {}
+    if final_exists:
+        try:
+            probe = ffmpeg_ops.probe_file(final)
+            duration = probe["duration_seconds"]
+        except RuntimeError:
+            probe = {}
+
+    expected = _expected_duration(ws)
+    if expected:
+        add(
+            "duration_match",
+            abs(duration - expected) <= 2.0,
+            f"成片 {duration:.1f}s vs 需求 {expected:.1f}s（允许 ±2s）",
+        )
+    add("resolution_ok", probe.get("width", 0) >= 512,
+        f"{probe.get('width', 0)}x{probe.get('height', 0)}")
+    add("audio_track_present", probe.get("has_audio", False),
+        f"has_audio={probe.get('has_audio', False)}")
+
+    missing_assets = _missing_assets(ws)
+    add("assets_complete", not missing_assets,
+        "全部产物存在" if not missing_assets else "; ".join(missing_assets[:5]))
+
+    passed = all(c["passed"] for c in checks)
+    report = {
+        "passed": passed,
+        "checks": checks,
+        "summary": "质检通过" if passed else "质检未通过，详见 checks",
+        "final_video": str(final.resolve()) if final.is_file() else None,
+    }
+    _write_json(ws / REPORT_DIR / "quality_report.json", report)
+    return report
+
+
+def _expected_duration(ws: Path) -> float:
+    """从 requirement.json / storyboard.json 宽松读取期望时长。"""
+    for name, key in (
+        (REQUIREMENT_FILE, "duration_seconds"),
+        (STORYBOARD_FILE, "total_duration_seconds"),
+    ):
+        path = ws / name
+        if not path.is_file():
+            continue
+        try:
+            data = extract_json(path.read_text(encoding="utf-8"))
+            value = float(data.get(key, 0))  # type: ignore[arg-type]
+            if value > 0:
+                return value
+        except (StoryboardError, TypeError, ValueError):
+            continue
+    return 0.0
+
+
+def _missing_assets(ws: Path) -> list[str]:
+    """核验三个 manifest 中每个 ok 条目的文件真实存在。"""
+    missing: list[str] = []
+    for rel in (f"{FRAMES_DIR}/manifest.json", f"{CLIPS_DIR}/manifest.json",
+                f"{AUDIO_DIR}/manifest.json"):
+        path = ws / rel
+        if not path.is_file():
+            missing.append(f"{rel} 缺失")
+            continue
+        try:
+            for entry in read_manifest(path):
+                if entry.get("status") not in (None, "ok"):
+                    continue
+                asset = resolve_in_workspace(entry.get("path", ""), ws)
+                if not asset.is_file():
+                    missing.append(f"{rel}: 缺 {entry.get('id')}")
+        except ValueError as exc:
+            missing.append(f"{rel}: {exc}")
+    return missing
+
+
+def _ok_entry(shot_id: int, kind: str, rel: str, path: Path) -> dict:
+    """manifest 条目：kind 为 image / video / audio。"""
+    return {
+        "id": shot_id,
+        kind: rel,
+        "status": "ok",
+        "path": str(Path(path).resolve()),
+    }
+
+
+def _failed_entry(shot_id: int, error: str) -> dict:
+    return {"id": shot_id, "status": "failed", "error": error}

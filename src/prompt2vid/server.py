@@ -40,8 +40,6 @@ from a2a.types import (
 )
 from fastapi import FastAPI
 
-from .crew import build_crew
-
 DEFAULT_PORT = 8081
 
 
@@ -99,6 +97,11 @@ def _load_agent_card() -> AgentCard:
 class Prompt2VidExecutor(AgentExecutor):
     """把 A2A 请求转交给 Crew 流水线执行。"""
 
+    # 流水线通过 PROMPT2VID_WORKSPACE 环境变量传递工作目录（进程级状态），
+    # 并发请求会互相覆盖，因此用锁把整条流水线串行化（GPU 生成本身也
+    # 不适合并行）。
+    _crew_lock = asyncio.Lock()
+
     def __init__(self) -> None:
         self.running_tasks: set[str] = set()
 
@@ -134,12 +137,14 @@ class Prompt2VidExecutor(AgentExecutor):
 
             run_dir = Path("output") / f"run_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
             run_dir.mkdir(parents=True, exist_ok=True)
-            os.environ.setdefault("PROMPT2VID_WORKSPACE", str(run_dir.resolve()))
 
-            crew = build_crew()
-            result = await asyncio.to_thread(
-                crew.kickoff, inputs={"user_prompt": query, "workspace": str(run_dir)}
-            )
+            from .pipeline import run_pipeline
+
+            async with Prompt2VidExecutor._crew_lock:
+                # run_pipeline 内部会覆盖式设置工作目录并写 run.log
+                # （此前 setdefault 会让第二个请求复用第一个请求的目录，
+                # 产物互相覆盖；锁同时避免并发请求的环境变量竞争）
+                result = await asyncio.to_thread(run_pipeline, query, run_dir)
 
             await updater.add_artifact(
                 parts=[Part(text=str(result))],

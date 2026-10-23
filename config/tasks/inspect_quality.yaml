@@ -1,23 +1,20 @@
 inspect_quality:
   description: >-
     对最终成片与全流程产物做质量检查。
-    使用文件与探测工具，逐项核验：
-    1. final/final.mp4 存在且可读；
+    直接调用 run_quality_checks 工具（无需任何参数）：该工具会自动读取
+    工作目录的 final/final.mp4、requirement.json 与三个 manifest 清单
+    （frames/clips/audio），用 ffprobe 确定性核验：
+    1. 成片存在且可读；
     2. 成片时长与需求 duration_seconds 误差在 ±2 秒内；
-    3. 成片分辨率与帧率正常（宽 ≥ 512）；
+    3. 成片分辨率达标（宽 ≥ 512）；
     4. 成片包含音轨；
-    5. 分镜产物齐全：frames/manifest.json、clips/manifest.json、
-       audio/manifest.json 中每个分镜的文件都真实存在。
-    将质检报告写入 report/quality_report.json：
-    {
-      "passed": true/false,
-      "checks": [{"name": "final_video_exists", "passed": true, "detail": "..."}, ...],
-      "summary": "一句话结论"
-    }
-    并在最终回答中给出报告 JSON。
-    要求：所有检查必须基于工具探测的真实结果，绝不臆测。
+    5. 分镜产物齐全（清单中每个文件真实存在）。
+    结果写入 report/quality_report.json。
+    调用完成后，把工具返回的质检报告 JSON 原样作为你的最终回答，
+    并用一句话明确结论（通过/未通过及主要原因）。
+    不要自己逐项调用探测工具拼凑报告。
   expected_output: >-
-    report/quality_report.json 质检报告，含 passed 布尔结论、逐项检查明细
-    （final_video_exists、duration_match、resolution_ok、audio_track_present、
-    assets_complete）与 summary。
+    run_quality_checks 工具返回的 JSON 质检报告：passed 布尔结论、
+    checks 逐项明细（final_video_exists、duration_match、resolution_ok、
+    audio_track_present、assets_complete）、summary、final_video。
   agent: quality_inspector
