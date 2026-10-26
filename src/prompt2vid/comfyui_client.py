@@ -100,6 +100,45 @@ class ComfyUITaskError(RuntimeError):
     """单个 ComfyUI 任务执行失败（wait/wait_all 收集，不中断同批其他任务）。"""
 
 
+def parse_output_files(entry: dict[str, Any]) -> list[dict[str, str]]:
+    """解析 history 条目的全部输出文件（兼容新旧 ComfyUI 格式）。
+
+    outputs[node_id] 的两种形态都支持：
+    - images 直接挂在节点下（经典文档格式，也是 2025+ 新版 master
+      的实际格式：ui_outputs[node_id] = ui_info["output"]）；
+    - 旧变体：{"ui": {"images": [...]}} 包装。
+    """
+    files: list[dict[str, str]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for node_outputs in entry.get("outputs", {}).values():
+        if not isinstance(node_outputs, dict):
+            continue
+        containers: list[dict[str, Any]] = [node_outputs]
+        ui = node_outputs.get("ui")
+        if isinstance(ui, dict):
+            containers.append(ui)
+        for container in containers:
+            for key in ("images", "gifs", "videos", "images_preview"):
+                items = container.get(key)
+                if not isinstance(items, list):
+                    continue
+                for item in items:
+                    if not (isinstance(item, dict) and item.get("filename")):
+                        continue
+                    record = {
+                        "filename": str(item["filename"]),
+                        "subfolder": str(item.get("subfolder") or ""),
+                        "type": str(item.get("type") or "output"),
+                    }
+                    identity = (
+                        record["filename"], record["subfolder"], record["type"]
+                    )
+                    if identity not in seen:
+                        seen.add(identity)
+                        files.append(record)
+    return files
+
+
 class ComfyUIClient:
     """ComfyUI HTTP API 最小客户端（单实例复用连接池，支持批量等待）。
 
@@ -128,7 +167,12 @@ class ComfyUIClient:
         prompt_id = str(uuid.uuid4())
         payload = {"prompt": workflow, "client_id": prompt_id}
         resp = self._http.post(f"{self.base_url}/prompt", json=payload)
-        resp.raise_for_status()
+        if resp.status_code != 200:
+            # 把响应体带进错误信息：节点缺失/校验失败的原因在 body 里
+            # （如 IPAdapter 未安装时 ComfyUI 返回 400 + node_errors）
+            raise RuntimeError(
+                f"ComfyUI 拒绝工作流（HTTP {resp.status_code}）: {resp.text[:500]}"
+            )
         data = resp.json()
         if "error" in data:
             raise RuntimeError(f"ComfyUI 拒绝工作流: {data['error']}")
@@ -141,10 +185,11 @@ class ComfyUIClient:
         entry = resp.json().get(prompt_id)
         if not entry:
             return None
-        status = entry.get("status", {})
-        if status.get("completed"):
+        status = entry.get("status") or {}
+        status_str = str(status.get("status_str") or "").lower()
+        if status.get("completed") or status_str == "success":
             return entry
-        if status.get("status_str") == "error":
+        if status_str == "error":
             raise ComfyUITaskError(f"ComfyUI 执行失败: {status}")
         return None
 
@@ -194,21 +239,8 @@ class ComfyUIClient:
         return done
 
     def outputs(self, entry: dict[str, Any]) -> list[dict[str, str]]:
-        """从 history 条目解析全部输出文件（兼容 images/gifs/videos 等键）。"""
-        files: list[dict[str, str]] = []
-        for node_outputs in entry.get("outputs", {}).values():
-            ui = node_outputs.get("ui") or node_outputs.get("images") or {}
-            for key in ("images", "gifs", "videos", "images_preview"):
-                for item in ui.get(key, []) if isinstance(ui, dict) else []:
-                    if isinstance(item, dict) and item.get("filename"):
-                        files.append(
-                            {
-                                "filename": item["filename"],
-                                "subfolder": item.get("subfolder", ""),
-                                "type": item.get("type", "output"),
-                            }
-                        )
-        return files
+        """从 history 条目解析全部输出文件（见 parse_output_files）。"""
+        return parse_output_files(entry)
 
     def download(self, file_info: dict[str, str], dest: Path) -> Path:
         """通过 /view 下载输出文件到本地。"""

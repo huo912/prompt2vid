@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 
 from prompt2vid import stages
-from prompt2vid.comfyui_client import ComfyUITaskError
+from prompt2vid.comfyui_client import ComfyUITaskError, parse_output_files
 
 HAS_FFMPEG = shutil.which("ffmpeg") is not None and shutil.which("ffprobe") is not None
 
@@ -111,7 +111,9 @@ class FakeComfyUIClient:
         return results
 
     def outputs(self, entry) -> list[dict]:
-        return [{"filename": "out.png", "subfolder": "", "type": "output"}]
+        # 走真实解析函数：mock 的 history 结构必须与真实 ComfyUI 一致
+        # （曾因 mock 绕过解析、格式与新版 ComfyUI 脱节导致线上全分镜失败）
+        return parse_output_files(entry)
 
     def download(self, file_info, dest) -> Path:
         dest = Path(dest)
