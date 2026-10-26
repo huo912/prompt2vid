@@ -8,15 +8,19 @@ CI 或装有 ffmpeg 的环境会覆盖）。
 from __future__ import annotations
 
 import json
-import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
 
 from prompt2vid import stages
 from prompt2vid.comfyui_client import ComfyUITaskError, parse_output_files
+from prompt2vid.ffmpeg_ops import resolve_tool
 
-HAS_FFMPEG = shutil.which("ffmpeg") is not None and shutil.which("ffprobe") is not None
+# 通过统一解析器定位 ffmpeg（PATH / 环境变量 / 随包二进制）；
+# ffprobe 缺失时探测会回退解析 ffmpeg 输出，因此只要求 ffmpeg。
+FFMPEG = resolve_tool("ffmpeg")
+HAS_FFMPEG = FFMPEG is not None
 
 STORYBOARD = {
     "shots": [
@@ -356,8 +360,6 @@ def test_generate_voiceovers_writes_manifest(tmp_path, monkeypatch):
 @pytest.mark.skipif(not HAS_FFMPEG, reason="本机未安装 ffmpeg/ffprobe")
 def test_render_final_and_quality_checks(tmp_path, monkeypatch):
     """用 lavfi 合成假片段与假配音，验证确定性剪辑与质检全链路。"""
-    import subprocess
-
     ws = _setup_workspace(tmp_path, monkeypatch)
 
     # 假首帧 + 假片段（testsrc 1s 视频）+ 假配音（sine 1s 音频）
@@ -365,7 +367,7 @@ def test_render_final_and_quality_checks(tmp_path, monkeypatch):
         frame = ws / "frames" / f"shot_{shot_id}.png"
         frame.parent.mkdir(parents=True, exist_ok=True)
         subprocess.run(
-            ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+            [FFMPEG, "-hide_banner", "-loglevel", "error", "-y",
              "-f", "lavfi", "-i", "color=c=blue:s=512x768:d=0.04",
              "-frames:v", "1", str(frame)],
             check=True,
@@ -373,7 +375,7 @@ def test_render_final_and_quality_checks(tmp_path, monkeypatch):
         clip = ws / "clips" / f"shot_{shot_id}.webm"
         clip.parent.mkdir(parents=True, exist_ok=True)
         subprocess.run(
-            ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+            [FFMPEG, "-hide_banner", "-loglevel", "error", "-y",
              "-f", "lavfi", "-i", "testsrc=size=512x768:rate=25",
              "-t", "1", "-c:v", "libvpx-vp9", str(clip)],
             check=True,
@@ -381,7 +383,7 @@ def test_render_final_and_quality_checks(tmp_path, monkeypatch):
         audio = ws / "audio" / f"shot_{shot_id}.mp3"
         audio.parent.mkdir(parents=True, exist_ok=True)
         subprocess.run(
-            ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+            [FFMPEG, "-hide_banner", "-loglevel", "error", "-y",
              "-f", "lavfi", "-i", "sine=frequency=440",
              "-t", "0.8", str(audio)],
             check=True,

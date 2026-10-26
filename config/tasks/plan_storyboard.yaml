@@ -27,8 +27,15 @@ plan_storyboard:
       "total_duration_seconds": 16
     }
     要求：
+    0. 工具调用是硬性要求：必须调用 write_json 把分镜表写进 storyboard.json
+       （只把 JSON 贴在回答里而不调用工具 = 本步骤失败）；
+    0b. 顶层必须是 JSON 对象（以 { 开头、以 } 结尾），且包含非空 "shots" 数组；
+       禁止把 storyboard.json 写成裸数组（如 [{...}, {...}]），
+       也禁止把 total_duration_seconds 作为 shots 数组里的一个元素——
+       它只能与 characters、shots 平级放在顶层；
     1. 视频中出现人物时必须定义 characters 数组（无人物的纯空镜视频可不写）；
-       每个出场人物一张角色卡，description 必须具体到可复现（发色、服装颜色
+       每个出场人物一张角色卡，description 必须**用英文**写（禁止中文，禁止
+       把画面 prompt 抄成角色描述），且具体到可复现（发色、服装颜色
        款式、体型年龄等），禁止抽象描述（如 "a beautiful girl"）；
     2. 每镜的 characters 字段列出该镜出场的角色 id（空镜写 [] 或不写）；
     3. image_prompt 必须逐字包含该镜全部出场角色的 description 原文

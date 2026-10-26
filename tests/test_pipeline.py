@@ -101,6 +101,36 @@ def test_run_pipeline_direct_media(tmp_path, fake_crews, fake_stages):
     assert (tmp_path / "storyboard.json").is_file()
 
 
+def test_run_pipeline_direct_media_salvages_storyboard(tmp_path, fake_stages, monkeypatch):
+    """创意 crew 没写文件、只在回答里贴 JSON 时，分镜表仍能被抢救落盘。"""
+    shot = {"id": 1, "narration": "旁白", "image_prompt": "a", "duration_seconds": 4}
+
+    class ChattyCreative:
+        task_names = pipeline.CREATIVE_TASKS
+
+        def __init__(self):
+            self.kickoff_inputs = None
+
+        def kickoff(self, inputs: dict) -> str:
+            self.kickoff_inputs = inputs
+            return "分镜表：\n```json\n" + json.dumps({"shots": [shot]}) + "\n```"
+
+    class PublishCrew:
+        def kickoff(self, inputs: dict) -> str:
+            return "published: dry_run"
+
+    def fake_build_crew(task_names=None):
+        return PublishCrew() if task_names == [pipeline.PUBLISH_TASK] else ChattyCreative()
+
+    monkeypatch.setattr("prompt2vid.crew.build_crew", fake_build_crew)
+
+    result = pipeline.run_pipeline("做一个视频", tmp_path, direct_media=True)
+
+    assert result == "published: dry_run"
+    saved = json.loads((tmp_path / "storyboard.json").read_text(encoding="utf-8"))
+    assert saved["shots"][0]["image_prompt"] == "a"
+
+
 def test_run_pipeline_crew_mode(tmp_path, fake_crews, fake_stages, monkeypatch):
     monkeypatch.setenv("PROMPT2VID_DIRECT_MEDIA", "0")
     pipeline.run_pipeline("做一个视频", tmp_path)

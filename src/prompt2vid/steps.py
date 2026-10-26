@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .pipeline import _STAGE_FUNCS, setup_logging
+from .llm_output import salvage_payload
 from .stages import (
     AUDIO_DIR,
     CLIPS_DIR,
@@ -256,6 +257,26 @@ def _clean_stage_output(run_dir: Path, stage: str) -> None:
         logger.info("强制重跑：已删除 %s", target)
 
 
+def _save_artifact(run_dir: Path, step: dict[str, Any], output: str) -> bool:
+    """产物缺失时从 LLM 最终回答抢救写入；成功返回 True。
+
+    小参数本地模型常只把 JSON/Markdown 贴在回答里而不调用写文件工具。
+    抢救内容经 salvage_payload 严判（JSON 需可解析且关键字段非空），
+    提取不出可信内容时保持失败，不写入半成品。
+    """
+    payload = salvage_payload(step["artifact"], output)
+    if payload is None:
+        return False
+    artifact = run_dir / step["artifact"]
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    artifact.write_text(payload, encoding="utf-8")
+    logger.warning(
+        "步骤 %s 未调用写文件工具，已从最终回答中恢复 %s（建议换用支持"
+        "工具调用的模型）", step["id"], step["artifact"],
+    )
+    return True
+
+
 def run_step(
     run_dir: str | Path,
     step_id: str,
@@ -302,7 +323,15 @@ def run_step(
             if step["artifact"]:
                 artifact = run_dir / step["artifact"]
                 if not artifact.is_file():
-                    error = f"未生成期望产物 {step['artifact']}（LLM 可能没有调用写文件工具）"
+                    if _save_artifact(run_dir, step, str(output)):
+                        summary = (
+                            summary + " ⚠ 产物由代码从最终回答抢救写入"
+                        )[:400]
+                    else:
+                        error = (
+                            f"未生成期望产物 {step['artifact']}"
+                            "（LLM 未调用写文件工具，且最终回答中未找到可信内容）"
+                        )
     except Exception as exc:  # noqa: BLE001 - 单步失败以状态返回而非中断调用方
         error = f"{type(exc).__name__}: {exc}"
         logger.exception("步骤 %s 异常", step_id)

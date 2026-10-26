@@ -81,12 +81,53 @@ def test_load_storyboard_wrapped_in_markdown(tmp_path: Path):
     assert len(shots) == 1
 
 
+def test_extract_json_top_level_array_not_truncated():
+    text = json.dumps([{"id": 1}, {"id": 2}])
+    assert storyboard.extract_json_value(text) == [{"id": 1}, {"id": 2}]
+    assert storyboard.extract_json(text) == {"shots": [{"id": 1}, {"id": 2}]}
+
+
+def test_load_storyboard_top_level_array(tmp_path: Path):
+    """LLM 直接把分镜写成裸数组时也要能解析（回归：曾只取到第一个分镜）。"""
+    data = [
+        {"id": 1, "narration": "a", "image_prompt": "shot one", "duration_seconds": 4},
+        {"id": 2, "narration": "b", "image_prompt": "shot two", "duration_seconds": 3},
+    ]
+    path = _write(tmp_path / "storyboard.json", json.dumps(data, ensure_ascii=False))
+    shots = storyboard.load_storyboard(path)
+    assert [s.id for s in shots] == [1, 2]
+    assert [s.image_prompt for s in shots] == ["shot one", "shot two"]
+
+
+def test_load_storyboard_array_with_trailing_summary(tmp_path: Path):
+    """数组末尾混入 {"total_duration_seconds": N} 时跳过该汇总项。"""
+    data = [
+        {"id": 1, "narration": "a", "image_prompt": "shot one", "duration_seconds": 4},
+        {"total_duration_seconds": 4},
+    ]
+    path = _write(tmp_path / "storyboard.json", json.dumps(data, ensure_ascii=False))
+    shots = storyboard.load_storyboard(path)
+    assert [s.id for s in shots] == [1]
+
+
+def test_load_storyboard_fenced_array_with_prose(tmp_path: Path):
+    data = [{"id": 1, "narration": "a", "image_prompt": "shot one"}]
+    content = "分镜表如下：\n```json\n" + json.dumps(data, ensure_ascii=False) + "\n```\n以上。"
+    path = _write(tmp_path / "storyboard.json", content)
+    shots = storyboard.load_storyboard(path)
+    assert len(shots) == 1
+
+
 def test_load_storyboard_errors(tmp_path: Path):
     # 不存在
     with pytest.raises(storyboard.StoryboardError):
         storyboard.load_storyboard(tmp_path / "missing.json")
     # 无 shots
     path = _write(tmp_path / "storyboard.json", "{}")
+    with pytest.raises(storyboard.StoryboardError):
+        storyboard.load_storyboard(path)
+    # 空数组
+    path = _write(tmp_path / "storyboard.json", "[]")
     with pytest.raises(storyboard.StoryboardError):
         storyboard.load_storyboard(path)
     # 非 JSON

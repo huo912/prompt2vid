@@ -5,8 +5,11 @@
 
 from __future__ import annotations
 
+import functools
 import json
 import os
+import re
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -14,18 +17,171 @@ from pathlib import Path
 # 可用 PROMPT2VID_SUBTITLE_STYLE 覆盖（libass force_style 语法）。
 DEFAULT_SUBTITLE_STYLE = "FontSize=18,Outline=1,MarginV=40"
 
+# 可执行文件解析：环境变量优先（便于 Windows/容器里指向绝对路径），
+# 其次 PATH，再退到常见安装目录与随包轮子（imageio-ffmpeg / static-ffmpeg）。
+_TOOL_ENV = {
+    "ffmpeg": ("PROMPT2VID_FFMPEG", "FFMPEG_BIN"),
+    "ffprobe": ("PROMPT2VID_FFPROBE", "FFPROBE_BIN"),
+}
+_COMMON_DIRS = (
+    Path.home() / ".local/bin",
+    Path("/usr/local/bin"),
+    Path("/opt/homebrew/bin"),
+    Path("/opt/ffmpeg/bin"),
+    Path("C:/ffmpeg/bin"),
+)
+
+
+def _as_executable(candidate: object) -> str | None:
+    """把候选路径规范化为可执行文件路径；不可用返回 None。"""
+    if not candidate:
+        return None
+    path = Path(str(candidate)).expanduser()
+    if path.is_file() and os.access(path, os.X_OK):
+        return str(path)
+    return None
+
+
+def _bundled_candidates(name: str):
+    """随 pip 包提供的二进制（缺失对应包时静默跳过）。
+
+    注意：只探测已下载到本地的二进制，绝不触发联网下载——static-ffmpeg
+    的公开 helper 会在调用时从 GitHub 拉取，网络受限时会长时间阻塞。
+    """
+    try:  # static-ffmpeg：同时提供 ffmpeg 与 ffprobe（仅本地已下载时）
+        from static_ffmpeg.run import get_platform_dir  # type: ignore
+
+        yield _as_executable(Path(get_platform_dir()) / name)
+    except Exception:  # noqa: BLE001 - 可选依赖，任何异常都视为不可用
+        pass
+    if name == "ffmpeg":
+        try:  # imageio-ffmpeg 只带 ffmpeg（不含 ffprobe）
+            import imageio_ffmpeg  # type: ignore
+
+            yield _as_executable(imageio_ffmpeg.get_ffmpeg_exe())
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def _missing_tool_error(name: str) -> RuntimeError:
+    return RuntimeError(
+        f"未找到 {name} 可执行文件。请安装 ffmpeg（含 {name}）并加入 PATH，"
+        f"或设置 {_TOOL_ENV[name][0]} 指向可执行文件路径；"
+        "本地也可 `pip install imageio-ffmpeg`（自动回退用 ffmpeg 探测）。"
+    )
+
+
+def _resolve_tool(name: str, allow_sibling: bool = True) -> str | None:
+    for var in _TOOL_ENV[name]:
+        raw = os.getenv(var, "").strip()
+        if not raw:
+            continue
+        found = _as_executable(raw) or shutil.which(raw)
+        if found:
+            return found
+    found = shutil.which(name)
+    if found:
+        return found
+    for directory in _COMMON_DIRS:
+        found = _as_executable(directory / name)
+        if found:
+            return found
+    for candidate in _bundled_candidates(name):
+        if candidate:
+            return candidate
+    if allow_sibling:
+        # 最后尝试：与另一个工具同目录（例如 ffmpeg/ffprobe 并列安装）
+        other = "ffprobe" if name == "ffmpeg" else "ffmpeg"
+        sibling = _resolve_tool(other, allow_sibling=False)
+        if sibling:
+            found = _as_executable(Path(sibling).with_name(name))
+            if found:
+                return found
+    return None
+
+
+@functools.lru_cache(maxsize=None)
+def resolve_tool(name: str) -> str | None:
+    """解析 ffmpeg / ffprobe 可执行文件路径，找不到返回 None（结果缓存）。"""
+    if name not in _TOOL_ENV:
+        raise ValueError(f"不支持的工具名: {name}")
+    return _resolve_tool(name)
+
+
+def require_tool(name: str) -> str:
+    """解析工具路径，找不到时抛出带安装指引的 RuntimeError。"""
+    path = resolve_tool(name)
+    if path is None:
+        raise _missing_tool_error(name)
+    return path
+
 
 def run_ffmpeg(args: list[str]) -> str:
     """执行 ffmpeg，失败抛 RuntimeError。"""
-    cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", *args]
+    cmd = [require_tool("ffmpeg"), "-hide_banner", "-loglevel", "error", "-y", *args]
     result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8")
     if result.returncode != 0:
         raise RuntimeError(f"ffmpeg 失败: {result.stderr.strip()}")
     return result.stdout
 
 
+_DURATION_RE = re.compile(r"Duration:\s*(\d+):(\d{2}):(\d{2}(?:\.\d+)?)")
+_VIDEO_SIZE_RE = re.compile(r":\s*Video:.*?(\d{2,5})x(\d{2,5})")
+_FPS_RE = re.compile(r"(\d+(?:\.\d+)?)\s*fps")
+_PROGRESS_TIME_RE = re.compile(r"time=(\d+):(\d{2}):(\d{2}(?:\.\d+)?)")
+
+
+def _hms_to_seconds(hours: str, minutes: str, seconds: str) -> float:
+    return int(hours) * 3600 + int(minutes) * 60 + float(seconds)
+
+
+def _probe_with_ffmpeg(ffmpeg: str, media: Path) -> dict:
+    """没有 ffprobe 时用 ffmpeg 的流信息输出解析（webm/mp3/mp4 通用）。"""
+    cmd = [ffmpeg, "-hide_banner", "-nostdin", "-i", str(media)]
+    result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8")
+    text = result.stderr or ""
+    if "Stream #" not in text:
+        raise RuntimeError(f"ffmpeg 解析媒体信息失败: {text.strip()[:400]}")
+
+    duration = 0.0
+    match = _DURATION_RE.search(text)
+    if match:
+        duration = _hms_to_seconds(*match.groups())
+
+    video_line = next(
+        (ln for ln in text.splitlines() if ": Video: " in ln), ""
+    )
+    size = _VIDEO_SIZE_RE.search(video_line)
+    width = int(size.group(1)) if size else 0
+    height = int(size.group(2)) if size else 0
+    fps_match = _FPS_RE.search(video_line)
+    fps = float(fps_match.group(1)) if fps_match else 0.0
+
+    if duration <= 0:
+        # 头部无时长（流式容器）：解码一遍取最后时间戳
+        decoded = subprocess.run(
+            [ffmpeg, "-hide_banner", "-nostdin", "-i", str(media), "-f", "null", "-"],
+            capture_output=True, text=True, encoding="utf-8",
+        )
+        times = _PROGRESS_TIME_RE.findall(decoded.stderr or "")
+        if times:
+            duration = _hms_to_seconds(*times[-1])
+
+    return {
+        "path": str(media.resolve()),
+        "duration_seconds": round(duration, 3),
+        "width": width,
+        "height": height,
+        "fps": round(fps, 3),
+        "has_audio": ": Audio: " in text,
+    }
+
+
 def probe_file(media: str | Path) -> dict:
     """探测媒体文件的时长、分辨率、帧率、音轨信息。
+
+    优先用 ffprobe；未安装 ffprobe 但 ffmpeg 可用时，回退解析
+    ffmpeg 的流信息（结果字段一致）。
 
     Returns:
         dict：path、duration_seconds、width、height、fps、has_audio。
@@ -33,8 +189,16 @@ def probe_file(media: str | Path) -> dict:
     media = Path(media)
     if not media.is_file():
         raise FileNotFoundError(f"文件不存在: {media}")
+
+    ffprobe = resolve_tool("ffprobe")
+    if ffprobe is None:
+        ffmpeg = resolve_tool("ffmpeg")
+        if ffmpeg is None:
+            raise _missing_tool_error("ffprobe")
+        return _probe_with_ffmpeg(ffmpeg, media)
+
     cmd = [
-        "ffprobe", "-v", "error", "-print_format", "json",
+        ffprobe, "-v", "error", "-print_format", "json",
         "-show_format", "-show_streams", str(media),
     ]
     result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8")

@@ -142,7 +142,13 @@ def _summary(stage: str, entries: list[dict], manifest_rel: str) -> dict:
             {"id": e["id"], "error": e.get("error", "")} for e in failed
         ]
         if not ok:
-            summary["error"] = f"全部 {len(entries)} 个分镜都失败，请检查 ComfyUI 与模型配置"
+            # 全批失败时把首个具体原因带进 error，避免只看到笼统提示
+            first = next((e.get("error", "") for e in failed if e.get("error")), "")
+            detail = " ".join(str(first).split())[:240]
+            summary["error"] = (
+                f"全部 {len(entries)} 个分镜都失败，请检查 ComfyUI 与模型配置"
+                + (f"；首个错误: {detail}" if detail else "")
+            )
     return summary
 
 

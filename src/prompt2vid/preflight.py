@@ -6,7 +6,7 @@
 
 CLI：prompt2vid "描述" 默认自动预检；也可 `prompt2vid --check-only`
 单独体检。检查项：
-1. ffmpeg / ffprobe 在 PATH；
+1. ffmpeg 可用（ffprobe 可选：缺失时探测回退解析 ffmpeg 输出）；
 2. ComfyUI 可达（GET /system_stats）；
 3. T2I checkpoint（CheckpointLoaderSimple 的 ckpt_name 候选中）；
 4. LTX checkpoint（同上）；
@@ -29,6 +29,7 @@ from .comfyui_client import (
     DEFAULT_T5,
     env_str,
 )
+from .ffmpeg_ops import resolve_tool
 
 POLL_TIMEOUT = 8.0
 
@@ -97,14 +98,19 @@ def check_environment(
     result = PreflightResult()
     checks = result.checks
 
-    # 1. ffmpeg / ffprobe
+    # 1. ffmpeg / ffprobe（ffmpeg 必需；ffprobe 缺失时探测会回退到 ffmpeg 解析）
     for tool in ("ffmpeg", "ffprobe"):
-        path = shutil.which(tool)
+        path = shutil.which(tool) or resolve_tool(tool)
+        ok = path is not None
+        detail = path or "未找到"
+        if not ok and tool == "ffprobe" and resolve_tool("ffmpeg"):
+            ok = True
+            detail = "未找到独立 ffprobe，探测将回退用 ffmpeg 解析（功能等价）"
         checks.append(
             Check(
                 name=tool,
-                ok=path is not None,
-                detail=path or "未找到",
+                ok=ok,
+                detail=detail,
                 hint=f"请安装 {tool} 并加入 PATH（Docker 镜像已内置，本地需自行安装）",
             )
         )

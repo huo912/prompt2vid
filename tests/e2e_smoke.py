@@ -3,7 +3,7 @@
 前置条件：
 1. ComfyUI 已运行且模型就位（见 deploy/comfyui/MODELS.md）
 2. .env 已配置 LLM API Key
-3. ffmpeg / ffprobe 在 PATH
+3. ffmpeg 可用（PATH、PROMPT2VID_FFMPEG，或 `pip install imageio-ffmpeg`）
 
 运行：
     python tests/e2e_smoke.py "做一个关于秋天的治愈系短视频"

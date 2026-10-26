@@ -137,6 +137,69 @@ def test_run_step_creative_missing_artifact(tmp_path, monkeypatch):
     assert "未生成期望产物 script.md" in result["error"]
 
 
+def test_run_step_salvages_storyboard_from_reply(tmp_path, monkeypatch):
+    """LLM 只在回答里贴出 JSON 时，从回答中抢救 storyboard.json。"""
+    shot = {
+        "id": 1,
+        "narration": "秋天",
+        "visual": "金色落叶",
+        "image_prompt": "autumn leaves",
+        "duration_seconds": 4,
+    }
+
+    class ChattyCrew(FakeCrew):
+        write_artifact = False
+
+        def kickoff(self, inputs: dict) -> str:
+            self.kickoff_inputs = inputs
+            return "分镜表如下：\n```json\n" + json.dumps({"shots": [shot]}) + "\n```"
+
+    monkeypatch.setattr("prompt2vid.crew.build_crew", lambda task_names=None: ChattyCrew(task_names))
+
+    result = steps.run_step(tmp_path, "plan_storyboard")
+    assert result["status"] == "done"
+    assert "抢救" in result["summary"]
+    saved = json.loads((tmp_path / "storyboard.json").read_text(encoding="utf-8"))
+    assert saved["shots"][0]["image_prompt"] == "autumn leaves"
+    # 抢救回来的产物必须能被下游解析器正常加载
+    from prompt2vid.storyboard import load_storyboard
+
+    assert [s.id for s in load_storyboard(tmp_path / "storyboard.json")] == [1]
+
+
+def test_run_step_salvage_rejects_unusable_reply(tmp_path, monkeypatch):
+    """回答里没有可信内容时仍判失败，不写入半成品文件。"""
+
+    class VagueCrew(FakeCrew):
+        write_artifact = False
+
+        def kickoff(self, inputs: dict) -> str:
+            return "抱歉，我无法完成这个任务。"
+
+    monkeypatch.setattr("prompt2vid.crew.build_crew", lambda task_names=None: VagueCrew(task_names))
+
+    result = steps.run_step(tmp_path, "plan_storyboard")
+    assert result["status"] == "failed"
+    assert "未找到可信内容" in result["error"]
+    assert not (tmp_path / "storyboard.json").exists()
+
+
+def test_run_step_does_not_overwrite_existing_artifact(tmp_path, monkeypatch):
+    """工具已写盘时不再走抢救路径（不覆盖工具产物）。"""
+    (tmp_path / "storyboard.json").write_text('{"shots": [{"id": 9}]}', encoding="utf-8")
+
+    class ToolCrew(FakeCrew):
+        def kickoff(self, inputs: dict) -> str:
+            return "```json\n{\"shots\": [{\"id\": 1}]}\n```"
+
+    monkeypatch.setattr("prompt2vid.crew.build_crew", lambda task_names=None: ToolCrew(task_names))
+
+    result = steps.run_step(tmp_path, "plan_storyboard")
+    assert result["status"] == "done"
+    saved = json.loads((tmp_path / "storyboard.json").read_text(encoding="utf-8"))
+    assert saved["shots"][0]["id"] == 9
+
+
 def test_run_step_force_deletes_stage_dir(tmp_path, monkeypatch):
     """强制重跑媒体步骤：产物目录在阶段函数执行前被删除。"""
     stage_dir = tmp_path / "frames"

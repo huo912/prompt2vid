@@ -63,8 +63,11 @@ def test_i2v_workflow_structure():
         "positive", "negative", "sampler", "sigmas", "latent_image",
     }
     assert sampler_inputs["cfg"] == 3.0
-    # LTXVConditioning 输出 3 个：positive(0)/negative(1)/LATENT(2)
-    assert sampler_inputs["latent_image"] == ["69", 2]
+    # latent 取自 LTXVImgToVideo 的输出 2（LATENT）；LTXVConditioning 只有
+    # positive/negative 两个输出，接它的 index 2 会被 ComfyUI 预校验拒绝
+    assert sampler_inputs["latent_image"] == ["95", 2]
+    assert sampler_inputs["positive"] == ["69", 0]
+    assert sampler_inputs["negative"] == ["69", 1]
     # LTXVImgToVideo 参数
     i2v_inputs = wf["95"]["inputs"]
     assert i2v_inputs["width"] == 512
@@ -75,6 +78,42 @@ def test_i2v_workflow_structure():
     assert wf["78"]["inputs"]["image"] == "shot_1.png"
     # 帧率一致性：LTXVConditioning 与 SaveWEBM 都用 25fps
     assert wf["69"]["inputs"]["frame_rate"] == wf["86"]["inputs"]["fps"] == 25.0
+
+
+# 各节点实际输出槽数量（对照 ComfyUI 0.21.1 的 RETURN_TYPES）。
+# 引用超出槽数的连线会被 ComfyUI 预校验拒绝（HTTP 400 list index out of range），
+# 这类错误本地就该拦住，不必等真实服务报错。
+_NODE_OUTPUT_SLOTS = {
+    "CLIPLoader": 1,
+    "CLIPTextEncode": 1,
+    "CheckpointLoaderSimple": 3,
+    "LoadImage": 2,
+    "LTXVPreprocess": 1,
+    "LTXVImgToVideo": 3,
+    "LTXVConditioning": 2,
+    "LTXVScheduler": 1,
+    "KSamplerSelect": 1,
+    "SamplerCustom": 2,
+    "VAEDecode": 1,
+    "SaveWEBM": 0,
+}
+
+
+def test_i2v_workflow_links_within_output_slots():
+    """每条连线引用的输出槽必须真实存在（回归：latent 误接 LTXVConditioning 的 2 号槽）。"""
+    wf = build_i2v_workflow("x.png", "a")
+    for node_id, node in wf.items():
+        assert node["class_type"] in _NODE_OUTPUT_SLOTS, node["class_type"]
+        for name, value in node["inputs"].items():
+            if not (isinstance(value, list) and len(value) == 2):
+                continue
+            src_id, slot = value
+            src_class = wf[src_id]["class_type"]
+            slots = _NODE_OUTPUT_SLOTS[src_class]
+            assert slot < slots, (
+                f"节点 {node_id}({node['class_type']}).{name} 引用了 "
+                f"{src_id}({src_class}) 的输出槽 {slot}，但该节点只有 {slots} 个输出"
+            )
 
 
 def test_workflows_are_json_serializable():

@@ -61,18 +61,44 @@ class Shot:
     fixes: list[str] = field(default_factory=list)
 
 
-def extract_json(text: str) -> dict:
-    """从文本中提取首个 JSON 对象（容忍代码栅栏 / 前后杂文）。"""
+def extract_json_value(text: str) -> object:
+    """从文本中提取首个 JSON 值（容忍代码栅栏 / 前后杂文）。
+
+    与 extract_json 的区别：顶层是数组时原样返回 list，不截断成第一个元素。
+    LLM 有时会直接输出 `[{分镜1}, {分镜2}, …]`，必须先整体解析再判断结构，
+    否则从第一个 `{` 起解析只会拿到单个分镜对象。
+    """
+    stripped = text.strip()
+    try:
+        return json.loads(stripped)
+    except json.JSONDecodeError:
+        pass
+
     decoder = json.JSONDecoder()
     for idx, ch in enumerate(text):
-        if ch != "{":
+        if ch not in "{[":
             continue
         try:
-            obj, _ = decoder.raw_decode(text, idx)
+            value, _ = decoder.raw_decode(text, idx)
         except json.JSONDecodeError:
             continue
-        if isinstance(obj, dict):
-            return obj
+        # 首个可完整解析的 JSON 值即结果；继续向后扫会把顶层数组
+        # 误判成数组里的第一个对象（正是本 bug 的成因）。
+        if isinstance(value, (dict, list)):
+            return value
+    raise StoryboardError(f"未能从内容中解析出 JSON 对象: {text[:120]!r}…")
+
+
+def extract_json(text: str) -> dict:
+    """从文本中提取 JSON 对象（容忍代码栅栏 / 前后杂文）。
+
+    顶层是数组时包装成 {"shots": [...]}，兼容旧调用方按对象取值的行为。
+    """
+    value = extract_json_value(text)
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, list):
+        return {"shots": value}
     raise StoryboardError(f"未能从内容中解析出 JSON 对象: {text[:120]!r}…")
 
 
@@ -179,12 +205,22 @@ def _parse_storyboard(
     if not path.is_file():
         raise StoryboardError(f"分镜表不存在: {path}（请先由分镜师生成 storyboard.json）")
     text = path.read_text(encoding="utf-8")
-    data = extract_json(text)
-    raw_shots = data.get("shots")
+    data = extract_json_value(text)
+    # 兼容两种顶层结构：
+    #   1) {"characters": [...], "shots": [...]}（推荐，提示词约定的格式）
+    #   2) [{分镜1}, {分镜2}, …]（LLM 常见偷懒写法，无角色卡）
+    if isinstance(data, list):
+        raw_shots: object = data
+        raw_characters: object = None
+    elif isinstance(data, dict):
+        raw_shots = data.get("shots")
+        raw_characters = data.get("characters")
+    else:
+        raise StoryboardError("分镜表顶层必须是 JSON 对象或分镜数组")
     if not isinstance(raw_shots, list) or not raw_shots:
         raise StoryboardError("分镜表缺少非空 shots 数组")
 
-    characters = _normalize_characters(data.get("characters"))
+    characters = _normalize_characters(raw_characters)
     shots: list[Shot] = []
     seen_ids: set[int] = set()
     for idx, item in enumerate(raw_shots, start=1):

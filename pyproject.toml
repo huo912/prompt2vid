@@ -22,6 +22,9 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
+# 本地无 ffmpeg 时可用随包静态二进制（imageio-ffmpeg 只带 ffmpeg，
+# 探测会自动回退解析 ffmpeg 输出；static-ffmpeg 另带 ffprobe）
+local-media = ["imageio-ffmpeg>=0.5"]
 
 [project.scripts]
 prompt2vid = "prompt2vid.main:main"

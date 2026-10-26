@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any
 
 from . import stages
+from .llm_output import salvage_payload
 from .workspace import set_workspace
 
 # 直接媒体模式下的 LLM 任务拆分
@@ -113,6 +114,23 @@ def run_media_stages(start: str = "frames") -> dict:
     return last
 
 
+def _ensure_creative_artifact(run_dir: Path, artifact: str, output: str) -> None:
+    """创意产物缺失时从 LLM 最终回答抢救写入（best-effort，不抛异常）。
+
+    直连模式下三个创意任务在同一次 crew 里执行，kickoff 只返回最后一个
+    （分镜）任务的回答，因此这里只能救 storyboard.json——它恰好是媒体
+    阶段唯一的创意依赖，缺了它整条链路都无法启动。
+    """
+    path = run_dir / artifact
+    if path.is_file() or not output:
+        return
+    payload = salvage_payload(artifact, output)
+    if payload is None:
+        return
+    path.write_text(payload, encoding="utf-8")
+    logger.warning("LLM 未写出 %s，已从最终回答中恢复（建议换用支持工具调用的模型）", artifact)
+
+
 def run_pipeline(
     prompt: str,
     run_dir: str | Path,
@@ -133,7 +151,8 @@ def run_pipeline(
 
     logger.info("以直接媒体模式执行（LLM 仅创意三阶段 + 发布）")
     creative = build_crew(task_names=CREATIVE_TASKS)
-    creative.kickoff(inputs=inputs)
+    output = creative.kickoff(inputs=inputs)
+    _ensure_creative_artifact(run_dir, "storyboard.json", str(output))
     logger.info("创意阶段完成，storyboard: %s", run_dir / "storyboard.json")
 
     run_media_stages()

@@ -477,7 +477,11 @@ def build_i2v_workflow(
                 "negative": ["69", 1],
                 "sampler": ["73", 0],
                 "sigmas": ["71", 0],
-                "latent_image": ["69", 2],
+                # latent 直接取 LTXVImgToVideo 的第 3 个输出（index 2）。
+                # 不能接 LTXVConditioning 的 index 2：该节点只有 2 个输出
+                # （positive/negative），引用越界会让 ComfyUI 在预校验阶段
+                # 报 "list index out of range"（HTTP 400）。
+                "latent_image": ["95", 2],
             },
         },
         "8": {

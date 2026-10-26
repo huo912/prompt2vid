@@ -207,6 +207,24 @@ Get-ChildItem "D:\ComfyUI_windows_portable\ComfyUI\models\checkpoints", `
 > 唯一要求：`ffmpeg` 和 `ffprobe` 两个 exe 都在 PATH 里。
 > Docker/k8s 部署无需此步（镜像内置）。
 
+#### 不想装系统包？两种免 root 方案
+
+1. **随包二进制（推荐，离线可用）**：
+   ```bash
+   pip install -e ".[local-media]"   # 即 imageio-ffmpeg，自带静态 ffmpeg
+   ```
+   `imageio-ffmpeg` 不含 `ffprobe`，但程序探测媒体时**会自动回退解析
+   ffmpeg 的流信息**，产出字段（时长/分辨率/fps/音轨）完全一致，
+   剪辑与质检照常工作。
+2. **手动指定路径**（自定义构建、容器内固定路径等）：
+   ```bash
+   PROMPT2VID_FFMPEG=/path/to/ffmpeg
+   PROMPT2VID_FFPROBE=/path/to/ffprobe   # 可选，缺失时走 ffmpeg 回退
+   ```
+   程序查找顺序为：环境变量 → `PATH` → `~/.local/bin`、`/usr/local/bin`
+   等常见目录 → 随包轮子（`static-ffmpeg` 含 ffprobe，`imageio-ffmpeg`
+   仅 ffmpeg）。两处都找不到时会报错并提示设置哪个变量。
+
 ### 5.2 .env 配置核对
 
 项目根目录 `.env`（本地运行形态）：

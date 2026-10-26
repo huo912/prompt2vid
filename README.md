@@ -92,6 +92,7 @@ prompt2vid/
 │   ├── preflight.py           # 环境预检（ComfyUI/模型/节点/ffmpeg）
 │   ├── stages.py              # 确定性阶段引擎（批量提交/重试/清单）
 │   ├── storyboard.py          # 分镜表宽松解析与修复
+│   ├── llm_output.py          # LLM 最终回答的产物抢救（未调用写文件工具时兜底）
 │   ├── comfyui_client.py      # ComfyUI HTTP 客户端（连接池/退避轮询/批量等待）
 │   ├── tts.py                 # edge-tts 配音纯函数（带回退链）
 │   ├── ffmpeg_ops.py          # ffmpeg 剪辑纯函数（探测/拼接/对齐/SRT/混流）
@@ -158,6 +159,8 @@ prompt2vid --resume output/run_xxx --only render --force    # 复用已有产物
 ```
 
 说明：创意步骤（需求 / 剧本 / 分镜）与发布走 LLM 单任务 crew；媒体五步直接执行 `stages.py` 的确定性函数——与对应 agent 转调的阶段工具是同一实现，只是省掉一次 LLM 往返。
+
+**产物兜底**：小参数本地模型常把 JSON/Markdown 贴在最终回答里而不调用写文件工具。此时创意步骤会尝试从最终回答中抢救产物（`llm_output.py`，JSON 需可解析且 `shots` 非空才落盘，寒暄类回答一律拒绝），抢救成功的步骤在 `steps.json` 的 summary 里带 `⚠ 产物由代码从最终回答抢救写入`。这只影响能否继续往下跑，不保证内容质量——生产环境建议使用支持工具调用的模型。
 
 ## k8s 部署（单节点集群）
 
@@ -271,6 +274,7 @@ curl -X POST http://<pod-ip>:8081/a2a/jsonrpc \
 | `PROMPT2VID_DIRECT_MEDIA` | true 时直接媒体模式（LLM 只做创意+发布） |
 | `PROMPT2VID_BGM` / `PROMPT2VID_BGM_VOLUME` | 可选背景音乐文件与音量（默认 0.25） |
 | `PROMPT2VID_SUBTITLE_STYLE` | 字幕烧录样式（libass force_style） |
+| `PROMPT2VID_FFMPEG` / `PROMPT2VID_FFPROBE` | 指定 ffmpeg/ffprobe 可执行文件路径（不设则按 PATH → 常见目录 → 随包二进制查找；ffprobe 缺失时探测自动回退解析 ffmpeg 输出） |
 | `DOUYIN_DRY_RUN` | true 时抖音发布仅记录状态 |
 
 ## 测试
@@ -280,9 +284,11 @@ pip install -e ".[dev]"
 pytest tests/ -v
 ```
 
-> 本地无 ffmpeg 时渲染/质检集成测试自动 skip；GitHub Actions
-> （[.github/workflows/ci.yml](.github/workflows/ci.yml)）会安装 ffmpeg +
-> CJK 字体跑全量测试。
+> 本地无 ffmpeg/ffprobe 时渲染/质检集成测试自动 skip；想在本机跑通渲染可
+> `pip install -e ".[local-media]"`（随包静态 ffmpeg，探测走 ffmpeg 回退），
+> 或按 [docs/LOCAL_SETUP.md](docs/LOCAL_SETUP.md) 5.1 安装系统 ffmpeg。
+> GitHub Actions（[.github/workflows/ci.yml](.github/workflows/ci.yml)）会安装
+> ffmpeg + CJK 字体跑全量测试。
 
 ## License
 

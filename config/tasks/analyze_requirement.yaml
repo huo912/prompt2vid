@@ -17,7 +17,8 @@ analyze_requirement:
     }
     要求：duration_seconds 必须在 15-30 之间；key_elements 至少 3 个；
     所有字段必须基于用户描述推导，不得虚构与描述无关的内容；
-    必须真实调用 write_json 工具把 JSON 写入 requirement.json。
+    必须真实调用 write_json 工具把 JSON 写入 requirement.json——
+    只把 JSON 贴在最终回答里而不调用工具，本步骤会被判定失败。
   expected_output: >-
     一个 JSON 对象（已通过文件工具写入 requirement.json），包含 topic、
     style、audience、duration_seconds、aspect_ratio、key_elements、tone、
