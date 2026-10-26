@@ -200,6 +200,141 @@ prompt2vid --check-only     # 本地执行，会真实连云机验证模型就�
 - 13B 的最佳采样参数（cfg 等）与 2B 有差异，见 README「角色一致性/模型
   切换」相关说明或联系项目维护者确认参数化改造进度。
 
+## 八、AutoDL 租用 5090：从零安装 ComfyUI（含无卡模式，保姆级）
+
+> 前提：采用「本地编排 + 云端 GPU」形态——**云机只跑 ComfyUI**，
+> prompt2vid / LLM / 剪辑都在你本地电脑上跑，云机不需要装本项目代码。
+
+### 8.1 租用实例与选镜像
+
+1. 注册 [autodl.com](https://www.autodl.com) 并充值（先充 ¥20 足够跑通全流程）；
+2. 「算力市场」筛选 **RTX 5090（32GB）**；区域优先选单价低的（西北等），
+   同款卡不同区差 10~20%；
+3. **镜像选择（最关键的一步）**：选带 **PyTorch 2.7+ / CUDA 12.8（cu128）**
+   的框架镜像。5090 是 Blackwell 架构，旧 torch（cu124 及更早）没有对应
+   内核，启动即报 `no kernel image is available`。若镜像列表没有 cu128 版，
+   选 Miniconda / CUDA 12.8 基础镜像，后面 8.5 步会手动装 torch；
+4. 数据盘默认即可（`/root/autodl-tmp`，关机保留；免费额度与扩容单价以
+   平台页面为准，模型 + ComfyUI 约 30~45GB）；
+5. 创建实例，记下控制台显示的 **SSH 登录指令**（形如
+   `ssh -p 12345 root@west-1.autodl.com`）。
+
+### 8.2 无卡模式开机（装环境不花 GPU 钱）
+
+**无卡模式 = 以约 1 折价格开机，看得见 CPU/内存/磁盘但看不见 GPU**，
+适合装环境、下模型这类不需要显卡的工作。
+
+1. 实例创建后先**立即关机**（控制台「关机」按钮；新实例按量计费从开机
+   起算，别空烧）；
+2. 在关机状态点「开机」时选择**「无卡模式开机」**（约 ¥0.1~0.5/小时，
+   具体以页面显示为准）；
+3. 开机后 `nvidia-smi` 报错或没有输出是**正常现象**——此模式下 GPU 不可见，
+   不影响 pip 安装和模型下载。
+
+### 8.3 连入云机
+
+```bash
+# 本地终端（PowerShell / Git Bash 均可），指令在 AutoDL 控制台「复制 ssh 登录指令」
+ssh -p 12345 root@west-1.autodl.com   # 端口和主机换成你自己的
+```
+
+不想用 SSH 也可以：控制台点 **JupyterLab**，在网页终端里执行同样的命令。
+
+### 8.4 加速与目录约定（一次设好）
+
+```bash
+# AutoDL 免费学术加速：加速 GitHub / HuggingFace 等访问（本会话有效）
+source /etc/network_turbo
+# 用完关闭（避免影响其他下载）：unset http_proxy && unset https_proxy
+
+# 约定：一切持久化内容放数据盘 /root/autodl-tmp（关机保留），
+# 系统盘 /root 下的内容在释放实例/迁移时会丢
+cd /root/autodl-tmp
+```
+
+### 8.5 安装 ComfyUI（无卡模式下完成）
+
+```bash
+# 1) 克隆 ComfyUI（GitHub 慢就先 source /etc/network_turbo）
+cd /root/autodl-tmp
+git clone https://github.com/comfyanonymous/ComfyUI.git
+cd ComfyUI
+
+# 2) 验证 torch 是否满足 5090 要求（无卡模式下也可执行，只查版本不碰 GPU）
+python -c "import torch; print(torch.__version__, torch.version.cuda)"
+# 要求：torch >= 2.7 且 cuda 为 12.8。不满足就重装（无需 GPU，无卡模式可做）：
+pip install -U torch torchvision torchaudio \
+  --index-url https://download.pytorch.org/whl/cu128
+
+# 3) 装 ComfyUI 依赖（已装好的 torch 会被自动复用，不会被降级）
+pip install -r requirements.txt
+
+# 4) 装 PyAV —— 本项目图生视频工作流的 SaveWEBM 节点输出 webm 必需
+pip install av
+
+# 5)（可选，角色一致性用）装 IPAdapter 自定义节点
+git clone https://github.com/cubiq/ComfyUI_IPAdapter_plus.git \
+  custom_nodes/ComfyUI_IPAdapter_plus
+```
+
+### 8.6 下载模型（无卡模式下完成）
+
+按 [§一 模型放置总表](#一模型文件放置总表核心配置就这一张) 下载标准档
+3 个模型；上高质量档则按 [§七 5090 高质量档下载清单](#七5090-高质量档模型下载清单第-2-档升级)
+下载 5 个文件——两节的命令在云机 shell 里原样可用（记得先
+`export HF_ENDPOINT=https://hf-mirror.com`）。
+
+### 8.7 关机 → 有卡开机 → 启动 ComfyUI
+
+```bash
+# 1) 环境装完，控制台「关机」（无卡计费停止）
+# 2) 重新开机（这次选「正常开机」，即有卡模式）
+# 3) SSH 连入后验证 GPU 与 torch：
+nvidia-smi                                          # 应显示 RTX 5090 32GB
+python -c "import torch; print(torch.cuda.is_available())"   # 应输出 True
+
+# 4) 启动 ComfyUI（32GB 显存，无需任何省显存参数）
+cd /root/autodl-tmp/ComfyUI
+nohup python main.py --listen 127.0.0.1 --port 8188 > comfyui.log 2>&1 &
+tail -f comfyui.log        # 看到 "To see the GUI go to: http://127.0.0.1:8188" 即成功
+```
+
+> `nohup ... &` 让 ComfyUI 在你断开 SSH 后继续运行；只监听 127.0.0.1，
+> 不暴露公网（配合下一步的 SSH 隧道使用）。
+
+### 8.8 本地打通与体检
+
+```bash
+# 本地电脑常驻这条隧道（端口/主机换成你的）：
+ssh -N -L 8188:127.0.0.1:8188 -p 12345 root@west-1.autodl.com
+
+# 浏览器打开 http://127.0.0.1:8188 能看到 ComfyUI 界面（纯围观用）
+# 项目体检（本地执行，.env 保持 COMFYUI_URL=http://127.0.0.1:8188 不变）：
+prompt2vid --check-only
+# 六项全 OK → 可以直接跑片
+```
+
+### 8.9 省钱与环境复用
+
+- **开关机节奏**：创意三步（LLM）在云机关机状态跑；媒体五步开机跑
+  （1 分钟视频约 40~70 分钟）；跑完立即关机。控制台可设**定时关机**兜底；
+- **个人镜像**：环境装好后控制台「更多 → 保存镜像」——以后开新实例
+  （同区域）直接选这个镜像，ComfyUI/依赖全免重装，只需挂回模型；
+- **模型放数据盘**（`/root/autodl-tmp`）或 AutoDL 网盘，关机/换实例不丢；
+- 详见 README「租用 GPU」相关讨论：轻度使用月成本 ¥10~30。
+
+### 8.10 常见问题
+
+| 症状 | 原因与处理 |
+|---|---|
+| ComfyUI 启动即 `no kernel image is available` | torch 是 cu124 及更早——回 8.5 第 2 步装 cu128 版 |
+| 无卡模式下 `nvidia-smi` 报错 | 正常，无卡模式本来就没有 GPU；装环境不受影响 |
+| `git clone` GitHub 超时 | 先 `source /etc/network_turbo`；仍不行用镜像 `git clone https://ghproxy.net/https://github.com/...` |
+| 本地打不开 127.0.0.1:8188 | 隧道没建或断了：重跑 8.8 的 ssh -N 命令；确认云机 ComfyUI 进程活着（`tail comfyui.log`） |
+| `--check-only` 报模型不存在 | 模型没下全或目录放错——对照 §一 总表 / §7.4 验证输出 |
+| SaveWEBM 节点报错 | 没装 `pip install av`（8.5 第 4 步） |
+| 断开 SSH 后 ComfyUI 停了 | 没用 nohup/tmux——按 8.7 第 4 步的命令启动 |
+
 ## 一句话总结
 
 **ComfyUI 侧的全部工作 = 放 3（~5）个文件 + （可选）clone 一个节点包 +
