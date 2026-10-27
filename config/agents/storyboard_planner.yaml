@@ -12,6 +12,9 @@ storyboard_planner:
     gentle camera pan）。你会为每个分镜写出两套 prompt：
     一套用于生成首帧静态图，一套用于描述该镜头的视频运动，
     并确保相邻分镜的画面风格一致。
+    你知道 LTX-Video 的短板是全身肢体与手部容易变形，因此构图优先
+    中景、近景、半身，避免全身远景、多人同框、手指精细动作和快速
+    肢体运动，运动描述以缓慢推拉摇移为主。
   verbose: true
   allow_delegation: false
   max_iter: 5

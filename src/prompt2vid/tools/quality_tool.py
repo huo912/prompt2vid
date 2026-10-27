@@ -21,7 +21,8 @@ def run_quality_checks() -> str:
     manifest 清单，逐项核验：
     1. 成片存在且可读；
     2. 时长与需求 duration_seconds 误差 ±2 秒内；
-    3. 分辨率达标（宽 ≥ 512）；
+    3. 分辨率达标（边长 ≥ 448 且像素数 ≥ 512x768 的 90%，
+       兼容跟随首帧宽高比得到的 480x832 / 576x1024 竖屏画幅）；
     4. 包含音轨；
     5. 分镜产物齐全（frames/clips/audio 清单中每个文件真实存在）。
     结果写入 report/quality_report.json。无需任何参数。

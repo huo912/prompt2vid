@@ -83,8 +83,8 @@ def image_to_video(
     prompt: str,
     output_path: str,
     negative_prompt: str = "",
-    width: int = 512,
-    height: int = 768,
+    width: int = 0,
+    height: int = 0,
     length: int = 41,
 ) -> str:
     """将首帧图转为视频片段（单镜原语，通常用 generate_clips 即可）。
@@ -94,8 +94,9 @@ def image_to_video(
         prompt: 英文提示词 = 画面描述 + 运动描述（如 'autumn park, slow zoom in'）。
         output_path: 视频保存路径（建议 .webm）。
         negative_prompt: 负面提示词，留空使用环境默认。
-        width: 视频宽度（默认 512，8GB 显存预算）。
-        height: 视频高度（默认 768，竖屏）。
+        width: 视频宽度；0（默认）= 按首帧真实画幅自动推导 32 倍数分辨率，
+            避免固定 512x768 把竖屏首帧裁变形。
+        height: 视频高度；0（默认）= 自动推导。
         length: 视频帧数（必须 8n+1；25fps 下 41 帧 ≈ 1.6s）。
 
     Returns:
@@ -108,8 +109,8 @@ def image_to_video(
         dest=dest,
         prompt=prompt,
         negative_prompt=negative_prompt,
-        width=width,
-        height=height,
+        width=width or None,
+        height=height or None,
         length=length,
     )
     return str(path.resolve())

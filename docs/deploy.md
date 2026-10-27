@@ -173,14 +173,20 @@ ls -lh "$MODELS"/checkpoints/ "$MODELS"/ipadapter/ "$MODELS"/clip_vision/ "$MODE
 COMFYUI_T2I_CHECKPOINT=RealVisXL_V5.0_fp16.safetensors
 COMFYUI_LTX_CHECKPOINT=ltxv-13b-0.9.7-distilled-fp8.safetensors
 COMFYUI_IPADAPTER=true
+# 首帧画幅（视频画幅会跟随首帧自动换算，不要固定 512x768）
+COMFYUI_T2I_WIDTH=768
+COMFYUI_T2I_HEIGHT=1344
+# 13B 单帧像素预算：576x1024；想上 720p 可改 921600（约 704x1248）
+COMFYUI_LTX_MAX_PIXELS=589824
 ```
 
 ```bash
 prompt2vid --check-only     # 本地执行，会真实连云机验证模型就位
 ```
 
-切回快速档：把这三行改回 `sd_xl_base_1.0.safetensors` /
-`ltx-video-2b-v0.9.5.safetensors` / 注释掉 IPADAPTER 即可。
+切回快速档：把 checkpoint 三行改回 `sd_xl_base_1.0.safetensors` /
+`ltx-video-2b-v0.9.5.safetensors` / 注释掉 IPADAPTER 即可，同时把
+`COMFYUI_LTX_MAX_PIXELS` 改回 `393216` 或直接删掉（会按 2B 自动选择）。
 
 ### 7.6 备注
 
@@ -188,6 +194,14 @@ prompt2vid --check-only     # 本地执行，会真实连云机验证模型就�
 - **变体选择**：追求极限质量可换 `ltxv-13b-0.9.7-dev-fp8.safetensors`
   （同 15.7GB，步数多、更慢）；画质上限更高有 bf16 版
   `ltxv-13b-0.9.7-distilled.safetensors`（28.6GB，5090 32GB 也能装）；
+- **13B 采样参数已自动化**：客户端按 checkpoint 文件名自动选择采样档位
+  （distilled → cfg 1.0 / 8 步；13B dev → cfg 3.0 / 30 步；2B → cfg 3.0 /
+  10 步），不再把 cfg 写死 3.0。需要手动微调时设
+  `COMFYUI_LTX_CFG` / `COMFYUI_LTX_STEPS` 覆盖；
+- **人物变形的主要根因**：首帧是 768x1344，而旧版视频工作流固定
+  512x768（宽高比 0.571 → 0.667），LTX 会把首帧裁切/挤压后再生成，人物
+  头脚被裁、肢体比例失真。现在 `generate_clips` 会读取首帧真实宽高，
+  换算成 32 倍数、符合显存预算的画幅（2B → 480x832，13B → 576x1024）；
 - **为什么是 RealVisXL 而不是 Juggernaut XL**：Juggernaut 的 HF 仓库受限
   登录（401），Civitai 下载需注册 + token；RealVisXL V5.0 是写实系同档
   水平且免登录直下。坚持要 Juggernaut 的话在 Civitai 生成 API Token 后：
@@ -197,8 +211,6 @@ prompt2vid --check-only     # 本地执行，会真实连云机验证模型就�
   ```
 - **本地 Windows 下载**：同样命令在 PowerShell 里跑，先执行
   `$env:HF_ENDPOINT = "https://hf-mirror.com"`；
-- 13B 的最佳采样参数（cfg 等）与 2B 有差异，见 README「角色一致性/模型
-  切换」相关说明或联系项目维护者确认参数化改造进度。
 
 ## 八、AutoDL 租用 5090：从零安装 ComfyUI（含无卡模式，保姆级）
 
@@ -335,8 +347,117 @@ prompt2vid --check-only
 | SaveWEBM 节点报错 | 没装 `pip install av`（8.5 第 4 步） |
 | 断开 SSH 后 ComfyUI 停了 | 没用 nohup/tmux——按 8.7 第 4 步的命令启动 |
 
+### 8.11 seetacloud 实例（SSH 隧道）专用配置
+
+本节以 `ssh -p 44264 root@connect.westd.seetacloud.com` 为例，适用于
+**云机只跑 ComfyUI、本地跑 prompt2vid** 的形态。与 AutoDL 的唯一区别
+是登录主机/端口，其余步骤同 8.5–8.9。
+
+#### 1）本地 `.env`：只改 `COMFYUI_URL`
+
+```ini
+# 云机 ComfyUI 只监听 127.0.0.1:8188，通过 SSH 隧道映射到本机同端口
+COMFYUI_URL=http://127.0.0.1:8188
+```
+
+模型文件名必须与云机上实际文件一致；不确定时先列目录再填：
+
+```bash
+ssh -p 44264 root@connect.westd.seetacloud.com \
+  'ls /root/autodl-tmp/ComfyUI/models/checkpoints /root/autodl-tmp/ComfyUI/models/text_encoders'
+```
+
+```ini
+COMFYUI_T2I_CHECKPOINT=sd_xl_base_1.0.safetensors
+COMFYUI_LTX_CHECKPOINT=ltx-video-2b-v0.9.5.safetensors
+COMFYUI_T5=t5xxl_fp8_e4m3fn.safetensors
+```
+
+> 32GB 显存（5090/4090 等）跑 13B 高质量档时，把上面三行换成 §7.5 的
+> `RealVisXL_V5.0_fp16.safetensors` / `ltxv-13b-0.9.7-distilled-fp8.safetensors`，
+> 并加上 `COMFYUI_T2I_WIDTH=768` / `COMFYUI_T2I_HEIGHT=1344` /
+> `COMFYUI_LTX_MAX_PIXELS=589824`；还可把 `COMFYUI_T5_DEVICE` 从 `cpu`
+> 改为 `default`（T5 上 GPU，更快）。换模型后务必跑一次 `prompt2vid --check-only`。
+>
+> 文件名填错也不必慌：生成前客户端会查 `/object_info/CheckpointLoaderSimple`，
+> 配置的 checkpoint 不在服务端候选列表时自动改用同类模型（T2I 跳过 LTX 视频
+> 模型），并打印 `WARNING ... 自动改用 xxx`。这只是兜底，预检仍会把真实
+> 文件名差异标出来，建议按 `--check-only` 的结果对齐 `.env`。
+
+#### 2）本地常驻 SSH 隧道
+
+```bash
+# 前台保持（Ctrl+C 即断开）；端口/主机换成你自己的
+ssh -N -L 8188:127.0.0.1:8188 -p 44264 root@connect.westd.seetacloud.com
+```
+
+建议写进 `~/.ssh/config`，以后一条 `ssh gpu-tunnel` 即可，并带心跳防止
+空闲断线：
+
+```sshconfig
+Host gpu-tunnel
+    HostName connect.westd.seetacloud.com
+    Port 44264
+    User root
+    LocalForward 8188 127.0.0.1:8188
+    ServerAliveInterval 30
+    ServerAliveCountMax 3
+    ExitOnForwardFailure yes
+```
+
+```bash
+ssh -N gpu-tunnel
+```
+
+> 想免密码登录先执行 `ssh-copy-id -p 44264 root@connect.westd.seetacloud.com`。
+> 本机 8188 已被占用时（如本地 ComfyUI），把 `-L 18188:127.0.0.1:8188`
+> 并同步把 `.env` 的 `COMFYUI_URL` 改成 `http://127.0.0.1:18188`。
+
+#### 3）云机侧：确认 ComfyUI 已启动
+
+```bash
+# SSH 进云机后（环境/模型按 8.5–8.6 准备）
+curl -s http://127.0.0.1:8188/system_stats | head -c 200   # 有 JSON 即正常
+# 没启动则：
+cd /root/autodl-tmp/ComfyUI
+nohup python main.py --listen 127.0.0.1 --port 8188 > comfyui.log 2>&1 &
+tail -f comfyui.log
+```
+
+若平台提供公网端口映射，也可以跳过隧道，直接把 `COMFYUI_URL` 设为平台
+给出的 `https://...` 地址（需 ComfyUI 以 `--listen 0.0.0.0` 启动）。
+
+#### 4）本地验证
+
+```bash
+# 隧道建好后，本地应能打开 ComfyUI 页面
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8188/system_stats   # 200
+
+prompt2vid --check-only
+# 六项全 OK 即配置完成；模型项 NG 时按输出的“可用: ...”改名 .env 变量
+```
+
+> 注意：SSH 隧道断开后 `COMFYUI_URL` 立刻不可达，预检会报“ComfyUI 可达 NG”。
+> 先重连隧道再跑，不需要改任何代码或 k8s 清单。云机关机后隧道也会失效，
+> 重新开机后主机名/端口可能变化，记得同步更新 `.env` 与隧道命令。
+
 ## 一句话总结
 
 **ComfyUI 侧的全部工作 = 放 3（~5）个文件 + （可选）clone 一个节点包 +
 启动**，其余由项目代码通过 API 完成；`prompt2vid --check-only` 是验证配置
 是否正确的唯一入口。
+
+
+
+hf download stabilityai/stable-diffusion-xl-base-1.0 sd_xl_base_1.0.safetensors
+  --local-dir "$MODELS/checkpoints"
+
+hf download Lightricks/LTX-Video ltx-video-2b-v0.9.5.safetensors
+  --local-dir "$MODELS/checkpoints"
+
+hf download comfyanonymous/flux_text_encoders t5xxl_fp8_e4m3fn.safetensors
+  --local-dir "$MODELS/text_encoders"
+
+
+
+ssh -p 44264 root@connect.westd.seetacloud.com

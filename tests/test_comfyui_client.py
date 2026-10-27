@@ -113,11 +113,22 @@ def test_next_seed_random_without_env(monkeypatch):
 def test_workflow_steps_env_override(monkeypatch):
     from prompt2vid.comfyui_client import build_i2v_workflow, build_t2i_workflow
 
+    # 其它测试可能 load_dotenv 把 .env 写进 os.environ（可能已切到 13B），
+    # 这里显式清理，验证“无覆盖时的内置默认值”。
+    for name in (
+        "COMFYUI_LTX_CHECKPOINT",
+        "COMFYUI_LTX_STEPS",
+        "COMFYUI_LTX_CFG",
+        "COMFYUI_T2I_STEPS",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
     wf_t2i = build_t2i_workflow(prompt="a", negative_prompt="b")
     assert wf_t2i["3"]["inputs"]["steps"] == 25  # 默认 25 步
 
     wf_i2v = build_i2v_workflow(image_name="x.png", prompt="a", negative_prompt="b")
-    assert wf_i2v["71"]["inputs"]["steps"] == 10  # LTX distilled 默认 10 步
+    assert wf_i2v["71"]["inputs"]["steps"] == 10  # LTX 2B 0.9.5 默认 10 步
+    assert wf_i2v["72"]["inputs"]["cfg"] == 3.0
 
     monkeypatch.setenv("COMFYUI_T2I_STEPS", "20")
     monkeypatch.setenv("COMFYUI_LTX_STEPS", "13")
@@ -221,3 +232,133 @@ def test_submit_rejection_includes_body():
     )
     with pytest.raises(RuntimeError, match="IPAdapterUnifiedLoader"):
         client.submit({"3": {"class_type": "X"}})
+
+
+# --------------------------------------------------- checkpoint 文件名自动校准
+
+def _checkpoint_info_handler(ckpts: list[str]):
+    """Mock /object_info/CheckpointLoaderSimple，返回候选 checkpoint 列表。
+
+    返回结构与真实 ComfyUI 0.21.x 一致：
+    `input.required.ckpt_name = [候选列表, {"tooltip": ...}]`
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/object_info/CheckpointLoaderSimple":
+            return httpx.Response(
+                200,
+                json={
+                    "CheckpointLoaderSimple": {
+                        "input": {
+                            "required": {
+                                "ckpt_name": [ckpts, {"tooltip": "The name..."}]
+                            }
+                        }
+                    }
+                },
+            )
+        return httpx.Response(404)
+
+    return handler
+
+
+def _client_with_checkpoints(ckpts: list[str]) -> ComfyUIClient:
+    return ComfyUIClient(
+        base_url="http://comfyui.test",
+        http=httpx.Client(transport=httpx.MockTransport(_checkpoint_info_handler(ckpts))),
+    )
+
+
+CKPTS = [
+    "RealVisXL_V5.0_fp16.safetensors",
+    "ltx-video-2b-v0.9.5.safetensors",
+    "ltxv-13b-0.9.7-distilled-fp8.safetensors",
+]
+
+
+def test_resolve_checkpoint_keeps_configured_when_available(monkeypatch):
+    monkeypatch.setenv("COMFYUI_T2I_CHECKPOINT", "RealVisXL_V5.0_fp16.safetensors")
+    assert _client_with_checkpoints(CKPTS).resolve_checkpoint("t2i") == (
+        "RealVisXL_V5.0_fp16.safetensors"
+    )
+
+
+def test_resolve_checkpoint_falls_back_to_sdxl_like_model(monkeypatch):
+    """回归：配置 sd_xl_base_1.0 而云机只有 RealVisXL/LTX → 自动选 RealVisXL。
+
+    旧行为是每个分镜都 HTTP 400 value_not_in_list，整段产不出图。
+    """
+    monkeypatch.setenv("COMFYUI_T2I_CHECKPOINT", "sd_xl_base_1.0.safetensors")
+    assert _client_with_checkpoints(CKPTS).resolve_checkpoint("t2i") == (
+        "RealVisXL_V5.0_fp16.safetensors"
+    )
+
+
+def test_resolve_ltx_checkpoint_picks_ltx_family(monkeypatch):
+    """配置的 LTX 名不可用时，优先 13B distilled（质量档），而不是 2B。"""
+    monkeypatch.setenv("COMFYUI_LTX_CHECKPOINT", "missing-ltx.safetensors")
+    assert _client_with_checkpoints(CKPTS).resolve_checkpoint("ltx") == (
+        "ltxv-13b-0.9.7-distilled-fp8.safetensors"
+    )
+
+
+def test_resolve_ltx_checkpoint_falls_back_to_2b_when_only_2b(monkeypatch):
+    monkeypatch.setenv("COMFYUI_LTX_CHECKPOINT", "missing-ltx.safetensors")
+    only_2b = [
+        "RealVisXL_V5.0_fp16.safetensors",
+        "ltx-video-2b-v0.9.5.safetensors",
+    ]
+    assert _client_with_checkpoints(only_2b).resolve_checkpoint("ltx") == (
+        "ltx-video-2b-v0.9.5.safetensors"
+    )
+
+
+def test_resolve_checkpoint_returns_configured_when_query_fails(monkeypatch):
+    """object_info 不可用时保持原配置（旧版 ComfyUI 不能被新逻辑拖挂）。"""
+    monkeypatch.setenv("COMFYUI_T2I_CHECKPOINT", "sd_xl_base_1.0.safetensors")
+    client = ComfyUIClient(
+        base_url="http://comfyui.test",
+        http=httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(404))),
+    )
+    assert client.resolve_checkpoint("t2i") == "sd_xl_base_1.0.safetensors"
+
+
+def test_workflow_checkpoint_override():
+    from prompt2vid.comfyui_client import build_i2v_workflow, build_t2i_workflow
+
+    wf_t2i = build_t2i_workflow(prompt="a", checkpoint="RealVisXL_V5.0_fp16.safetensors")
+    assert wf_t2i["44"]["inputs"]["ckpt_name"] == "RealVisXL_V5.0_fp16.safetensors"
+    wf_i2v = build_i2v_workflow(
+        "x.png", "a", checkpoint="ltxv-13b-0.9.7-distilled-fp8.safetensors"
+    )
+    assert wf_i2v["44"]["inputs"]["ckpt_name"] == "ltxv-13b-0.9.7-distilled-fp8.safetensors"
+
+
+def test_combo_values_handles_all_schema_variants():
+    """回归：真实 ComfyUI 0.21.x 把输入放在 input.required 下且候选外包一层配置。
+
+    旧解析只认 input.<field> 的扁平写法，导致 preflight 显示"可用: 无"，
+    自动校准也拿不到候选列表。
+    """
+    from prompt2vid.comfyui_client import combo_values
+
+    nested = {
+        "input": {
+            "required": {
+                "ckpt_name": [["a.safetensors", "b.safetensors"], {"tooltip": "x"}]
+            }
+        }
+    }
+    assert combo_values(nested, "ckpt_name") == ["a.safetensors", "b.safetensors"]
+    # CLIPLoader 的真实写法：只有候选列表，没有配置尾项
+    assert combo_values(
+        {"input": {"required": {"clip_name": [["t5xxl_fp8_e4m3fn.safetensors"]]}}},
+        "clip_name",
+    ) == ["t5xxl_fp8_e4m3fn.safetensors"]
+    assert combo_values({"input": {"ckpt_name": ["c.safetensors"]}}, "ckpt_name") == [
+        "c.safetensors"
+    ]
+    assert combo_values(
+        {"input": {"ckpt_name": {"value": ["d.safetensors"], "tooltip": "x"}}},
+        "ckpt_name",
+    ) == ["d.safetensors"]

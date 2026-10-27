@@ -15,6 +15,11 @@ def test_all_checks_pass(monkeypatch):
     monkeypatch.setattr(
         "prompt2vid.preflight.shutil.which", lambda name: f"/usr/bin/{name}"
     )
+    # 不受本地 .env 影响：固定成本测试期望的模型名
+    monkeypatch.setenv("COMFYUI_T2I_CHECKPOINT", "sd_xl_base_1.0.safetensors")
+    monkeypatch.setenv("COMFYUI_LTX_CHECKPOINT", "ltx-video-2b-v0.9.5.safetensors")
+    monkeypatch.setenv("COMFYUI_T5", "t5xxl_fp8_e4m3fn.safetensors")
+
     def handler(request: httpx.Request) -> httpx.Response:
         path = request.url.path
         if path == "/system_stats":
@@ -92,3 +97,6 @@ def test_combo_values_supports_dict_format():
     assert preflight._combo_values(spec, "ckpt_name") == ["a.safetensors"]
     spec2 = {"input": {"ckpt_name": ["b.safetensors"]}}
     assert preflight._combo_values(spec2, "ckpt_name") == ["b.safetensors"]
+    # 真实 ComfyUI 0.21.x：input.required 嵌套 + [候选, 配置]
+    spec3 = {"input": {"required": {"ckpt_name": [["c.safetensors"], {"tooltip": "x"}]}}}
+    assert preflight._combo_values(spec3, "ckpt_name") == ["c.safetensors"]

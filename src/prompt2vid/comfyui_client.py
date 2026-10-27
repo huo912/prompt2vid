@@ -12,6 +12,8 @@ ltxv_image_to_video_simple.0.9.5.json / ltxv_text_to_video.json
 from __future__ import annotations
 
 import itertools
+import logging
+import math
 import mimetypes
 import os
 import random
@@ -22,12 +24,25 @@ from typing import Any
 
 import httpx
 
+logger = logging.getLogger("prompt2vid.comfyui")
+
 DEFAULT_COMFYUI_URL = "http://127.0.0.1:8188"
 DEFAULT_T2I_CHECKPOINT = "sd_xl_base_1.0.safetensors"
 DEFAULT_LTX_CHECKPOINT = "ltx-video-2b-v0.9.5.safetensors"
 DEFAULT_T5 = "t5xxl_fp8_e4m3fn.safetensors"
 DEFAULT_T5_DEVICE = "cpu"
 DEFAULT_TIMEOUT = 1800.0
+
+# 文生图画幅（竖屏 4:7）。首帧与视频必须共用同一画幅，否则 LTX 会把
+# 竖图裁/压进横向或更窄的画布，人物肢体就会被裁掉或拉变形。
+DEFAULT_T2I_WIDTH = 768
+DEFAULT_T2I_HEIGHT = 1344
+# LTX 分辨率必须是 32 的倍数（官方模型卡约束）。
+LTX_SIZE_MULTIPLE = 32
+# LTX 单帧像素预算：显存越大可以给越高。
+# 2B / 8-12GB 档：512x768；13B / 24-32GB 档：576x1024（约 1.5 倍像素）。
+DEFAULT_LTX_MAX_PIXELS = 512 * 768
+LTX_13B_MAX_PIXELS = 576 * 1024
 # 轮询指数退避：1s 起步、1.5 倍增长、5s 封顶（短视频任务比固定 5s 省 10-20s）
 POLL_START = 1.0
 POLL_MAX = 5.0
@@ -36,13 +51,23 @@ POLL_MAX = 5.0
 DEFAULT_T2I_STEPS = 25
 DEFAULT_LTX_STEPS = 10
 
+# 自动挑选替代 checkpoint 时的优先级（t2i）：写实/通用 SDXL 系模型。
+# LTX 是图生视频模型，不能拿来文生图。
+_T2I_CHECKPOINT_HINTS = (
+    "realvis", "sd_xl", "sdxl", "juggernaut", "dreamshaper", "pony", "illustrious",
+)
+CHECKPOINT_LOADER = "CheckpointLoaderSimple"
+
 DEFAULT_T2I_NEGATIVE = (
     "low quality, worst quality, deformed, distorted, disfigured, "
-    "bad anatomy, extra limbs, ugly, watermark, text"
+    "bad anatomy, bad hands, extra fingers, fused fingers, extra limbs, "
+    "malformed limbs, ugly, watermark, text"
 )
 DEFAULT_LTX_NEGATIVE = (
     "low quality, worst quality, deformed, distorted, disfigured, "
-    "motion smear, motion artifacts, fused fingers, bad anatomy, weird hand, ugly"
+    "motion smear, motion artifacts, fused fingers, extra fingers, "
+    "missing fingers, extra limbs, malformed limbs, bad anatomy, "
+    "bad hands, weird hand, twisted body, body morphing, ugly"
 )
 
 # 角色一致性（IPAdapter 参考图注入）：需在 ComfyUI 安装
@@ -78,6 +103,148 @@ def env_int(name: str, default: int) -> int:
         return default
 
 
+def _snap_multiple(value: float, multiple: int = LTX_SIZE_MULTIPLE) -> int:
+    """向下取整到 multiple 的倍数（至少一个 multiple）。"""
+    return max(multiple, int(value) // multiple * multiple)
+
+
+def image_dimensions(path: str | Path) -> tuple[int, int] | None:
+    """读取 PNG 头里的宽高（首帧都是 ComfyUI 输出的 PNG）。
+
+    只读 24 字节，不加载整图；非 PNG / 读取失败返回 None，由调用方回退到
+    环境变量里的默认画幅（测试用的假文件就是这种情况）。
+    """
+    try:
+        with Path(path).open("rb") as f:
+            head = f.read(24)
+    except OSError:
+        return None
+    if len(head) < 24 or head[:8] != b"\x89PNG\r\n\x1a\n" or head[12:16] != b"IHDR":
+        return None
+    width = int.from_bytes(head[16:20], "big")
+    height = int.from_bytes(head[20:24], "big")
+    if width <= 0 or height <= 0:
+        return None
+    return width, height
+
+
+def default_t2i_size() -> tuple[int, int]:
+    """文生图画幅（COMFYUI_T2I_WIDTH/HEIGHT，默认 768x1344 竖屏）。"""
+    return (
+        env_int("COMFYUI_T2I_WIDTH", DEFAULT_T2I_WIDTH),
+        env_int("COMFYUI_T2I_HEIGHT", DEFAULT_T2I_HEIGHT),
+    )
+
+
+def is_ltx_13b(checkpoint: str | None = None) -> bool:
+    name = checkpoint or env_str("COMFYUI_LTX_CHECKPOINT", DEFAULT_LTX_CHECKPOINT)
+    return "13b" in name.lower()
+
+
+def ltx_max_pixels(checkpoint: str | None = None) -> int:
+    """LTX 单帧像素预算：显式 COMFYUI_LTX_MAX_PIXELS 优先，否则按模型档位。"""
+    override = env_int("COMFYUI_LTX_MAX_PIXELS", 0)
+    if override > 0:
+        return override
+    return LTX_13B_MAX_PIXELS if is_ltx_13b(checkpoint) else DEFAULT_LTX_MAX_PIXELS
+
+
+def fit_ltx_size(
+    width: int, height: int, max_pixels: int | None = None
+) -> tuple[int, int]:
+    """把任意画幅换算成 LTX 可用的分辨率。
+
+    约束：
+    - 宽高均为 32 的倍数（LTX 官方硬约束）；
+    - 像素数不超过预算（显存）；
+    - 尽量保持首帧的宽高比，且绝不上采样。
+
+    这一步是修复「人物变形」的关键：此前首帧是 768x1344，视频却固定按
+    512x768 生成，宽高比 0.571 → 0.667，LTX 只能裁切/挤压首帧，人物
+    头脚被裁、身体比例失真。
+    """
+    width = max(LTX_SIZE_MULTIPLE, int(width))
+    height = max(LTX_SIZE_MULTIPLE, int(height))
+    budget = max(LTX_SIZE_MULTIPLE * LTX_SIZE_MULTIPLE, int(max_pixels or DEFAULT_LTX_MAX_PIXELS))
+
+    if (
+        width % LTX_SIZE_MULTIPLE == 0
+        and height % LTX_SIZE_MULTIPLE == 0
+        and width * height <= budget
+    ):
+        return width, height
+
+    ratio = width / height
+    # 允许 2% 的宽高比误差，优先取预算内更大的分辨率
+    tolerance = 0.02
+    upper = int(budget * (1 + tolerance))
+    max_w = min(width, int(math.sqrt(upper * ratio)) + LTX_SIZE_MULTIPLE)
+    best: tuple[int, int, int] | None = None  # (面积, 宽, 高)
+    for candidate_w in range(LTX_SIZE_MULTIPLE, max_w + 1, LTX_SIZE_MULTIPLE):
+        ideal_h = candidate_w / ratio
+        steps = {
+            int(round(ideal_h / LTX_SIZE_MULTIPLE)) * LTX_SIZE_MULTIPLE,
+            int(ideal_h // LTX_SIZE_MULTIPLE) * LTX_SIZE_MULTIPLE,
+            int(math.ceil(ideal_h / LTX_SIZE_MULTIPLE)) * LTX_SIZE_MULTIPLE,
+        }
+        for candidate_h in steps:
+            if candidate_h < LTX_SIZE_MULTIPLE or candidate_h > height:
+                continue
+            if candidate_w > width:
+                continue
+            area = candidate_w * candidate_h
+            if area > upper:
+                continue
+            if abs((candidate_w / candidate_h) - ratio) / ratio > tolerance:
+                continue
+            if best is None or area > best[0]:
+                best = (area, candidate_w, candidate_h)
+
+    if best is not None:
+        return best[1], best[2]
+
+    # 极端画幅兜底：预算内的正方形，至少保证 32 倍数
+    side = _snap_multiple(math.sqrt(budget))
+    return side, side
+
+
+def resolve_ltx_size(
+    width: int, height: int, checkpoint: str | None = None
+) -> tuple[int, int]:
+    """把首帧尺寸换算为 LTX 画布；显式 COMFYUI_LTX_WIDTH/HEIGHT 时直接采用。"""
+    env_w = env_int("COMFYUI_LTX_WIDTH", 0)
+    env_h = env_int("COMFYUI_LTX_HEIGHT", 0)
+    if env_w > 0 and env_h > 0:
+        return (
+            _snap_multiple(env_w),
+            _snap_multiple(env_h),
+        )
+    return fit_ltx_size(width, height, ltx_max_pixels(checkpoint))
+
+
+def default_ltx_size(checkpoint: str | None = None) -> tuple[int, int]:
+    """按文生图画幅推导 LTX 画幅（不传首帧尺寸时使用）。"""
+    width, height = default_t2i_size()
+    return resolve_ltx_size(width, height, checkpoint)
+
+
+def ltx_sampling_defaults(checkpoint: str | None = None) -> tuple[float, int]:
+    """按 LTX 模型档位返回 (cfg, steps) 默认值。
+
+    - 0.9.7/0.9.8 distilled：Lightricks 官方节点说明是 cfg=1.0、8 步左右；
+      用 3.0 会把蒸馏模型「过采样」，肢体/手部更容易崩。
+    - 13B dev：cfg=3.0、30 步。
+    - 2B 0.9.5：cfg=3.0、10 步。
+    COMFYUI_LTX_CFG / COMFYUI_LTX_STEPS 可显式覆盖。
+    """
+    name = (checkpoint or env_str("COMFYUI_LTX_CHECKPOINT", DEFAULT_LTX_CHECKPOINT)).lower()
+    if "distilled" in name:
+        return 1.0, 8
+    if "13b" in name or "-dev" in name:
+        return 3.0, 30
+    return 3.0, DEFAULT_LTX_STEPS
+
+
 def next_seed() -> int:
     """取下一个种子：设了 PROMPT2VID_SEED 则 base+n（可复现），否则随机。"""
     base = os.getenv("PROMPT2VID_SEED", "").strip()
@@ -87,6 +254,40 @@ def next_seed() -> int:
         except ValueError:
             pass
     return random.randint(0, 2**32 - 1)
+
+
+def combo_values(node_spec: dict[str, Any], field_name: str) -> list[str]:
+    """从 object_info 的节点定义里取 combo 候选值。
+
+    兼容三种真实格式：
+    - 新版 ComfyUI：`{"input": {"required": {"ckpt_name": [[...候选...], {...}]}}}`
+      （候选列表外面还包了一层 [值列表, 配置]）；
+    - `{"input": {"ckpt_name": [...]}}`；
+    - `{"input": {"ckpt_name": {"value": [...]}}}`。
+    """
+    inputs = node_spec.get("input") or {}
+    raw: Any = inputs.get(field_name)
+    if raw is None:
+        for group in ("required", "optional"):
+            group_inputs = inputs.get(group)
+            if isinstance(group_inputs, dict) and field_name in group_inputs:
+                raw = group_inputs[field_name]
+                break
+        else:
+            return []
+
+    # 新版 ComfyUI：候选包在列表里，可能带配置尾项
+    # （checkpoint: [[候选...], {"tooltip": ...}]；CLIPLoader: [[候选...]]）
+    while isinstance(raw, list) and raw and isinstance(raw[0], list):
+        raw = raw[0]
+
+    if isinstance(raw, dict):
+        for key in ("value", "values", "options"):
+            values = raw.get(key)
+            if isinstance(values, list):
+                return [str(v) for v in values]
+        return []
+    return [str(v) for v in raw] if isinstance(raw, list) else []
 
 
 def ipadapter_enabled() -> bool:
@@ -152,6 +353,7 @@ class ComfyUIClient:
     def __init__(self, base_url: str | None = None, http: httpx.Client | None = None) -> None:
         self.base_url = (base_url or env_str("COMFYUI_URL", DEFAULT_COMFYUI_URL)).rstrip("/")
         self._http = http or httpx.Client(timeout=30.0)
+        self._checkpoint_cache: dict[str, str] = {}
 
     def close(self) -> None:
         self._http.close()
@@ -161,6 +363,85 @@ class ComfyUIClient:
 
     def __exit__(self, *exc: object) -> None:
         self.close()
+
+    def object_info(self, node: str) -> dict[str, Any]:
+        """GET /object_info/<node>；服务不支持或出错时返回空 dict。"""
+        try:
+            resp = self._http.get(f"{self.base_url}/object_info/{node}", timeout=10.0)
+        except httpx.HTTPError:
+            return {}
+        if resp.status_code != 200:
+            return {}
+        try:
+            data = resp.json()
+        except ValueError:
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    def available_checkpoints(self) -> list[str]:
+        """ComfyUI 当前可用的 checkpoint 文件名（查询失败时为空列表）。"""
+        spec = self.object_info(CHECKPOINT_LOADER).get(CHECKPOINT_LOADER) or {}
+        return combo_values(spec, "ckpt_name")
+
+    def resolve_checkpoint(self, role: str = "t2i") -> str:
+        """返回实际可用的 checkpoint 文件名（配置名缺失时自动降级并告警）。
+
+        云机上模型文件名常与 `.env` 默认值不一致（例如只下到
+        `RealVisXL_V5.0_fp16.safetensors`），旧行为是每个分镜都收到
+        HTTP 400 `value_not_in_list`，整段流水线全失败。这里先查
+        `/object_info/CheckpointLoaderSimple`：配置值在候选里就原样用，
+        不在则按角色挑同类模型（t2i 排除 LTX 视频模型；ltx 只选文件名
+        含 `ltx` 的）。查询失败（旧版 ComfyUI / 网络异常）时返回配置值，
+        保持原行为。
+        """
+        if role in self._checkpoint_cache:
+            return self._checkpoint_cache[role]
+        if role == "ltx":
+            requested = env_str("COMFYUI_LTX_CHECKPOINT", DEFAULT_LTX_CHECKPOINT)
+        else:
+            requested = env_str("COMFYUI_T2I_CHECKPOINT", DEFAULT_T2I_CHECKPOINT)
+        candidates = self.available_checkpoints()
+        chosen = requested
+        if candidates and requested not in candidates:
+            usable = self._rank_checkpoints(candidates, role)
+            if usable:
+                chosen = usable[0]
+                logger.warning(
+                    "ComfyUI: %s checkpoint %s 不可用，自动改用 %s（服务端可用: %s）",
+                    role, requested, chosen, ", ".join(candidates),
+                )
+        self._checkpoint_cache[role] = chosen
+        return chosen
+
+    @staticmethod
+    def _rank_checkpoints(candidates: list[str], role: str) -> list[str]:
+        """按角色对候选 checkpoint 排序（相似度优先，其余按名字稳定排序）。"""
+        if role == "ltx":
+            usable = [c for c in candidates if "ltx" in c.lower()]
+
+            def ltx_score(name: str) -> tuple[int, str]:
+                low = name.lower()
+                if "13b" in low and "distilled" in low:
+                    return 0, low  # 5090/24G+ 首选：质量最好且采样便宜
+                if "13b" in low:
+                    return 1, low  # 13B dev：质量高但需要更多步数
+                if "distilled" in low:
+                    return 2, low  # 2B distilled
+                return 3, low  # 2B 0.9.5 / 其它
+
+            usable.sort(key=ltx_score)
+            return usable
+
+        def score(name: str) -> int:
+            low = name.lower()
+            for index, hint in enumerate(_T2I_CHECKPOINT_HINTS):
+                if hint in low:
+                    return index
+            return len(_T2I_CHECKPOINT_HINTS)
+
+        usable = [c for c in candidates if "ltx" not in c.lower()]
+        usable.sort(key=lambda c: (score(c), c))
+        return usable
 
     def submit(self, workflow: dict[str, Any]) -> str:
         """提交工作流，返回 prompt_id。"""
@@ -274,10 +555,11 @@ class ComfyUIClient:
 def build_t2i_workflow(
     prompt: str,
     negative_prompt: str = "",
-    width: int = 768,
-    height: int = 1344,
+    width: int | None = None,
+    height: int | None = None,
     seed: int | None = None,
     reference: dict[str, Any] | None = None,
+    checkpoint: str | None = None,
 ) -> dict[str, Any]:
     """SDXL 文生图工作流（API 格式）。
 
@@ -285,14 +567,21 @@ def build_t2i_workflow(
     EmptyLatentImage → KSampler → VAEDecode → SaveImage
 
     Args:
+        checkpoint: 覆盖 `COMFYUI_T2I_CHECKPOINT` / 默认值；调用方通常传
+            `ComfyUIClient.resolve_checkpoint("t2i")` 的返回值，以适配云机上
+            实际存在的模型文件名。
         reference: 角色参考图注入（IPAdapter）。传 {"image_name": 已上传的
             参考图名} 即可，weight/preset 缺省读 COMFYUI_IPADAPTER_WEIGHT /
             COMFYUI_IPADAPTER_PRESET。节点链变为：
             CheckpointLoader → IPAdapterUnifiedLoader → IPAdapter(参考图)
             → KSampler，需要 ComfyUI 安装 ComfyUI_IPAdapter_plus。
     """
-    ckpt = env_str("COMFYUI_T2I_CHECKPOINT", DEFAULT_T2I_CHECKPOINT)
+    ckpt = checkpoint or env_str("COMFYUI_T2I_CHECKPOINT", DEFAULT_T2I_CHECKPOINT)
     negative = negative_prompt or env_str("COMFYUI_NEGATIVE_PROMPT", DEFAULT_T2I_NEGATIVE)
+    if width is None or height is None:
+        default_width, default_height = default_t2i_size()
+        width = default_width if width is None else width
+        height = default_height if height is None else height
     workflow: dict[str, Any] = {
         "44": {
             "class_type": "CheckpointLoaderSimple",
@@ -381,20 +670,38 @@ def build_i2v_workflow(
     image_name: str,
     prompt: str,
     negative_prompt: str = "",
-    width: int = 512,
-    height: int = 768,
+    width: int | None = None,
+    height: int | None = None,
     length: int = 41,
     seed: int | None = None,
+    checkpoint: str | None = None,
 ) -> dict[str, Any]:
     """LTX-Video 图生视频工作流（API 格式）。
 
     节点链（对照官方 ltxv_image_to_video_simple.0.9.5.json）：
     CLIPLoader(T5) → CLIPTextEncode(正/负) → LTXVImgToVideo → LTXVConditioning →
-    SamplerCustom(cfg=3.0) ← KSamplerSelect(euler) + LTXVScheduler；
+    SamplerCustom ← KSamplerSelect(euler) + LTXVScheduler；
     CheckpointLoaderSimple(LTX) 提供 MODEL/VAE；
     LoadImage → LTXVPreprocess；VAEDecode → SaveWEBM
+
+    Args:
+        width/height: 不传时按首帧默认画幅（COMFYUI_T2I_WIDTH/HEIGHT）
+            推导出 32 倍数且符合显存预算的 LTX 画幅。调用方应尽量传首帧
+            的真实宽高，保证画幅一致，避免人物被裁切/拉伸。
+        checkpoint: 覆盖 `COMFYUI_LTX_CHECKPOINT` / 默认值；通常传
+            `ComfyUIClient.resolve_checkpoint("ltx")` 的返回值。cfg/步数
+            会按模型档位自动选择（distilled：cfg 1.0 / 8 步；13B dev：
+            cfg 3.0 / 30 步；2B：cfg 3.0 / 10 步）。
     """
-    ltx_ckpt = env_str("COMFYUI_LTX_CHECKPOINT", DEFAULT_LTX_CHECKPOINT)
+    ltx_ckpt = checkpoint or env_str("COMFYUI_LTX_CHECKPOINT", DEFAULT_LTX_CHECKPOINT)
+    if width is None or height is None:
+        default_width, default_height = default_ltx_size(ltx_ckpt)
+        width = default_width if width is None else width
+        height = default_height if height is None else height
+    cfg_default, steps_default = ltx_sampling_defaults(ltx_ckpt)
+    cfg = env_float("COMFYUI_LTX_CFG", cfg_default)
+    steps = env_int("COMFYUI_LTX_STEPS", steps_default)
+    img_compression = env_int("COMFYUI_LTX_IMG_COMPRESSION", 35)
     t5 = env_str("COMFYUI_T5", DEFAULT_T5)
     t5_device = env_str("COMFYUI_T5_DEVICE", DEFAULT_T5_DEVICE)
     negative = negative_prompt or env_str("COMFYUI_LTX_NEGATIVE_PROMPT", DEFAULT_LTX_NEGATIVE)
@@ -428,7 +735,7 @@ def build_i2v_workflow(
         },
         "82": {
             "class_type": "LTXVPreprocess",
-            "inputs": {"image": ["78", 0], "img_compression": 35},
+            "inputs": {"image": ["78", 0], "img_compression": img_compression},
         },
         "95": {
             "class_type": "LTXVImgToVideo",
@@ -455,7 +762,7 @@ def build_i2v_workflow(
         "71": {
             "class_type": "LTXVScheduler",
             "inputs": {
-                "steps": env_int("COMFYUI_LTX_STEPS", DEFAULT_LTX_STEPS),
+                "steps": steps,
                 "max_shift": 2.05,
                 "base_shift": 0.95,
                 "stretch": True,
@@ -471,7 +778,7 @@ def build_i2v_workflow(
             "inputs": {
                 "add_noise": True,
                 "noise_seed": seed if seed is not None else next_seed(),
-                "cfg": 3.0,
+                "cfg": cfg,
                 "model": ["44", 0],
                 "positive": ["69", 0],
                 "negative": ["69", 1],
@@ -516,12 +823,13 @@ def run_text_to_image(
     prompt: str,
     dest: str | Path,
     negative_prompt: str = "",
-    width: int = 768,
-    height: int = 1344,
+    width: int | None = None,
+    height: int | None = None,
     seed: int | None = None,
     client: ComfyUIClient | None = None,
+    checkpoint: str | None = None,
 ) -> Path:
-    """SDXL 文生图：生成一张图片并保存到 dest。"""
+    """SDXL 文生图：生成一张图片并保存到 dest（尺寸缺省读环境变量）。"""
     dest = Path(dest)
     workflow = build_t2i_workflow(
         prompt=prompt,
@@ -529,6 +837,7 @@ def run_text_to_image(
         width=width,
         height=height,
         seed=seed,
+        checkpoint=checkpoint,
     )
     return run_workflow(workflow, dest, client)
 
@@ -538,19 +847,28 @@ def run_image_to_video(
     dest: str | Path,
     prompt: str,
     negative_prompt: str = "",
-    width: int = 512,
-    height: int = 768,
+    width: int | None = None,
+    height: int | None = None,
     length: int = 41,
     seed: int | None = None,
     client: ComfyUIClient | None = None,
+    checkpoint: str | None = None,
 ) -> Path:
     """LTX-Video 图生视频：把首帧图转为视频片段并保存到 dest。
 
-    首帧图会自动上传到 ComfyUI。length 必须满足 8n+1（LTX 约束）。
+    首帧图会自动上传到 ComfyUI。length 必须满足 8n+1（LTX 约束）；
+    width/height 不传时会读取首帧真实宽高，换算成 32 倍数且符合显存
+    预算的画幅，避免画幅不一致导致人物变形。
     """
     image = Path(image)
     if not image.is_file():
         raise FileNotFoundError(f"首帧图不存在: {image}")
+    if width is None or height is None:
+        frame_size = image_dimensions(image)
+        frame_w, frame_h = frame_size or default_t2i_size()
+        resolved_w, resolved_h = resolve_ltx_size(frame_w, frame_h, checkpoint)
+        width = resolved_w if width is None else width
+        height = resolved_h if height is None else height
     client = client or ComfyUIClient()
     uploaded = client.upload_image(image)
     workflow = build_i2v_workflow(
@@ -561,5 +879,6 @@ def run_image_to_video(
         height=height,
         length=length,
         seed=seed,
+        checkpoint=checkpoint,
     )
     return run_workflow(workflow, Path(dest), client)

@@ -29,9 +29,12 @@ from .comfyui_client import (
     ComfyUIClient,
     build_i2v_workflow,
     build_t2i_workflow,
+    default_t2i_size,
     env_int,
     env_str,
+    image_dimensions,
     ipadapter_enabled,
+    resolve_ltx_size,
     run_text_to_image,
 )
 from .storyboard import (
@@ -59,6 +62,26 @@ REPORT_DIR = "report"
 DEFAULT_LTX_FPS = 25
 DEFAULT_LTX_MAX_FRAMES = 121
 MIN_FRAMES = 9  # 8*1+1
+
+# LTX 对人物肢体的稳定性提示：模型本身没有 anatomy 先验，正向提示词里
+# 补一句能明显减少手部/四肢在运动中被「脑补」成多余肢体。
+DEFAULT_LTX_PROMPT_SUFFIX = (
+    "consistent anatomy, natural body proportions, stable limbs, detailed hands"
+)
+
+
+def _ltx_prompt(shot: Shot) -> str:
+    """构造图生视频正向提示词：场景 + 运动 + 肢体稳定约束。"""
+    parts = [
+        part.strip(" ,")
+        for part in (shot.image_prompt, shot.motion_prompt)
+        if part and part.strip()
+    ]
+    text = ", ".join(parts)
+    suffix = env_str("COMFYUI_LTX_PROMPT_SUFFIX", DEFAULT_LTX_PROMPT_SUFFIX)
+    if suffix and suffix.lower() not in text.lower():
+        text = f"{text}, {suffix}" if text else suffix
+    return text
 
 
 def frames_for_duration(seconds: float) -> int:
@@ -162,7 +185,10 @@ def _reference_prompt(character: Character) -> str:
 
 
 def _prepare_character_refs(
-    ws: Path, characters: dict[int, Character], client: ComfyUIClient
+    ws: Path,
+    characters: dict[int, Character],
+    client: ComfyUIClient,
+    checkpoint: str | None = None,
 ) -> dict[int, dict]:
     """为每个角色生成/复用一张定妆照并上传，返回 char_id → 参考图注入参数。
 
@@ -180,6 +206,7 @@ def _prepare_character_refs(
                     width=1024,
                     height=1024,
                     client=client,
+                    checkpoint=checkpoint,
                 )
                 logger.info("frames: 角色 %s 定妆照已生成: %s",
                             character.name or cid, dest.name)
@@ -241,9 +268,14 @@ def generate_frames(workspace: str | Path | None = None) -> dict:
 
     if pending:
         with ComfyUIClient() as client:
+            # 配置的 checkpoint 名在云机上可能不存在（如只下了 RealVisXL）：
+            # 开局按 ComfyUI 实际模型列表校准一次，避免每镜都 HTTP 400 全失败
+            t2i_checkpoint = client.resolve_checkpoint("t2i")
             refs: dict[int, dict] = {}
             if characters:
-                refs = _prepare_character_refs(ws, characters, client)
+                refs = _prepare_character_refs(
+                    ws, characters, client, checkpoint=t2i_checkpoint
+                )
                 if not refs:
                     logger.warning("frames: 没有可用的角色参考图，全部按无参考生成")
             shot_by_id = {s.id: s for s in shots}
@@ -253,7 +285,11 @@ def generate_frames(workspace: str | Path | None = None) -> dict:
 
             def make_workflow(shot: Shot) -> dict:
                 reference = None if shot.id in degraded else _shot_reference(shot, refs)
-                return build_t2i_workflow(prompt=shot.image_prompt, reference=reference)
+                return build_t2i_workflow(
+                    prompt=shot.image_prompt,
+                    reference=reference,
+                    checkpoint=t2i_checkpoint,
+                )
 
             for attempt in range(_retries() + 1):
                 if not pending:
@@ -311,11 +347,20 @@ def generate_clips(workspace: str | Path | None = None) -> dict:
         if shot_id in storyboard:
             image_of[shot_id] = resolve_in_workspace(frame.get("path", ""), ws)
 
+    # 首帧画幅是视频画幅的唯一依据：读不到（如测试假文件）才退回默认画幅
+    frame_w, frame_h = default_t2i_size()
+    for image_path in image_of.values():
+        dims = image_dimensions(image_path)
+        if dims:
+            frame_w, frame_h = dims
+            break
+
     def dest_of(shot: Shot) -> Path:
         return ws / CLIPS_DIR / f"shot_{shot.id}.webm"
 
     ok: dict[int, Path] = {}
     lengths: dict[int, int] = {}
+    sizes: dict[int, tuple[int, int]] = {}
     errors: dict[int, str] = {}
     pending: list[Shot] = []
     for shot in storyboard.values():
@@ -330,6 +375,8 @@ def generate_clips(workspace: str | Path | None = None) -> dict:
 
     if pending:
         with ComfyUIClient() as client:
+            # 同上：按服务端实际模型列表校准 LTX checkpoint 文件名
+            ltx_checkpoint = client.resolve_checkpoint("ltx")
             for attempt in range(_retries() + 1):
                 if not pending:
                     break
@@ -341,8 +388,19 @@ def generate_clips(workspace: str | Path | None = None) -> dict:
                     uploaded = client.upload_image(image_of[shot.id])
                     length = frames_for_duration(shot.duration_seconds)
                     lengths[shot.id] = length
-                    prompt = f"{shot.image_prompt} {shot.motion_prompt}".strip()
-                    return build_i2v_workflow(image_name=uploaded, prompt=prompt, length=length)
+                    # 逐镜按首帧真实画幅换算 LTX 画布（32 倍数 + 显存预算），
+                    # 保证首帧不被 LTXVImgToVideo 裁切/挤压
+                    shot_w, shot_h = image_dimensions(image_of[shot.id]) or (frame_w, frame_h)
+                    width, height = resolve_ltx_size(shot_w, shot_h, ltx_checkpoint)
+                    sizes[shot.id] = (width, height)
+                    return build_i2v_workflow(
+                        image_name=uploaded,
+                        prompt=_ltx_prompt(shot),
+                        width=width,
+                        height=height,
+                        length=length,
+                        checkpoint=ltx_checkpoint,
+                    )
 
                 batch_ok, batch_errors, pending = _batch_run(
                     pending, make_workflow, dest_of, client
@@ -358,6 +416,8 @@ def generate_clips(workspace: str | Path | None = None) -> dict:
         if shot.id in ok:
             entry = _ok_entry(shot.id, "video", f"{CLIPS_DIR}/shot_{shot.id}.webm", ok[shot.id])
             entry["length"] = lengths.get(shot.id)
+            if shot.id in sizes:
+                entry["width"], entry["height"] = sizes[shot.id]
             entries.append(entry)
         elif shot.id in errors:
             entries.append(_failed_entry(shot.id, errors[shot.id]))
@@ -557,8 +617,21 @@ def run_quality_checks(workspace: str | Path | None = None) -> dict:
             abs(duration - expected) <= 2.0,
             f"成片 {duration:.1f}s vs 需求 {expected:.1f}s（允许 ±2s）",
         )
-    add("resolution_ok", probe.get("width", 0) >= 512,
-        f"{probe.get('width', 0)}x{probe.get('height', 0)}")
+    # 画幅现在跟随首帧宽高比（如 768x1344 → 480x832 / 576x1024），
+    # 不能再用“宽 ≥ 512”判定，否则合法的竖屏 480x832 会被误判为不达标。
+    video_w = int(probe.get("width", 0) or 0)
+    video_h = int(probe.get("height", 0) or 0)
+    min_pixels = env_int("PROMPT2VID_MIN_CLIP_PIXELS", int(512 * 768 * 0.9))
+    resolution_ok = (
+        video_w >= 448
+        and video_h >= 448
+        and video_w * video_h >= min_pixels
+    )
+    add(
+        "resolution_ok",
+        resolution_ok,
+        f"{video_w}x{video_h}（要求 ≥448 边长且 ≥{min_pixels} 像素）",
+    )
     add("audio_track_present", probe.get("has_audio", False),
         f"has_audio={probe.get('has_audio', False)}")
 

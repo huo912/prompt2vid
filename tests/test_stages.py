@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 
 from prompt2vid import stages
-from prompt2vid.comfyui_client import ComfyUITaskError, parse_output_files
+from prompt2vid.comfyui_client import ComfyUITaskError, fit_ltx_size, parse_output_files
 from prompt2vid.ffmpeg_ops import resolve_tool
 
 # 通过统一解析器定位 ffmpeg（PATH / 环境变量 / 随包二进制）；
@@ -128,6 +128,10 @@ class FakeComfyUIClient:
     def upload_image(self, image_path, name=None) -> str:
         self.uploads.append(Path(image_path))
         return Path(image_path).name
+
+    def resolve_checkpoint(self, role: str = "t2i") -> str:
+        # 真实客户端会查 /object_info 校准文件名；mock 固定返回可预测值
+        return f"mock-{role}.safetensors"
 
     def close(self) -> None:
         pass
@@ -267,6 +271,8 @@ def test_generate_frames_with_character_reference(tmp_path, monkeypatch):
 def test_generate_frames_reference_disabled_by_default(tmp_path, monkeypatch):
     """默认关闭：只走一期 prompt 契约，无定妆照、无 IPAdapter 节点。"""
     _setup_workspace(tmp_path, monkeypatch, STORYBOARD_WITH_CHARACTERS)
+    # 本地 .env 可能开了 IPAdapter，测试必须显式关闭
+    monkeypatch.delenv("COMFYUI_IPADAPTER", raising=False)
     fake = _use_fake_client(monkeypatch)
 
     summary = stages.generate_frames()
@@ -330,13 +336,52 @@ def test_generate_clips_batch_from_frames_manifest(tmp_path, monkeypatch):
     # 整批一次性提交
     assert len(fake.submitted) == 2
     first_wf = fake.submitted[0]
-    # prompt = image_prompt + motion_prompt
+    # prompt = image_prompt + motion_prompt + 肢体稳定提示
     text = first_wf["6"]["inputs"]["text"]
     assert "autumn park, golden leaves" in text
     assert "slow zoom in" in text
+    assert "consistent anatomy" in text
+    # 视频画幅跟首帧画幅一致（回归：固定 512x768 会把 768x1344 首帧裁变形）
+    width = first_wf["95"]["inputs"]["width"]
+    height = first_wf["95"]["inputs"]["height"]
+    expected_w, expected_h = fit_ltx_size(768, 1344, 512 * 768)
+    assert (width, height) == (expected_w, expected_h)
+    assert width % 32 == 0 and height % 32 == 0
+    assert manifest["shots"][0]["width"] == width
+    assert manifest["shots"][0]["height"] == height
     # 4s → 105 帧（25fps、8n+1 约束）
     assert first_wf["95"]["inputs"]["length"] == 105
     assert manifest["shots"][0]["length"] == 105
+
+
+def test_generate_clips_reads_first_frame_size(tmp_path, monkeypatch):
+    """首帧 PNG 头里的 768x1344 必须成为视频画幅依据，而不是默认 512x768。"""
+    ws = _setup_workspace(tmp_path, monkeypatch)
+    frames_dir = ws / "frames"
+    frames_dir.mkdir(parents=True, exist_ok=True)
+    entries = []
+    for shot_id in (1, 2):
+        frame = frames_dir / f"shot_{shot_id}.png"
+        frame.write_bytes(
+            b"\x89PNG\r\n\x1a\n"
+            b"\x00\x00\x00\rIHDR"
+            + (768).to_bytes(4, "big")
+            + (1344).to_bytes(4, "big")
+        )
+        entries.append(
+            {"id": shot_id, "image": frame.name, "status": "ok", "path": str(frame)}
+        )
+    (frames_dir / "manifest.json").write_text(
+        json.dumps({"shots": entries}), encoding="utf-8"
+    )
+
+    fake = _use_fake_client(monkeypatch)
+    summary = stages.generate_clips()
+
+    assert summary["succeeded"] == 2
+    width = fake.submitted[0]["95"]["inputs"]["width"]
+    height = fake.submitted[0]["95"]["inputs"]["height"]
+    assert (width, height) == fit_ltx_size(768, 1344, 512 * 768)
 
 
 def test_generate_voiceovers_writes_manifest(tmp_path, monkeypatch):

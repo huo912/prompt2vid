@@ -49,7 +49,14 @@ plan_storyboard:
     7. narration 与剧本逐镜文案一致；
     8. id 从 1 开始连续编号；
     9. 必须真实调用 write_json 工具把分镜表写入 storyboard.json
-       （下游所有生成环节都从这个文件读取）。
+       （下游所有生成环节都从这个文件读取）；
+    10. 构图优先中景 / 近景 / 半身，避免全身远景、多人同框和复杂姿势
+        （LTX-Video 对全身肢体和手部的稳定性最弱，全身镜头最容易变形）；
+        手部不要作为画面主体，避免 "typing"、"playing piano"、"holding
+        chopsticks" 等手指精细动作；
+    11. motion_prompt 以缓慢、小幅运动为主（slow zoom in、gentle pan、
+        subtle drift），避免快速走路/奔跑/挥手/转身等大幅度肢体动作；
+        人物主体尽量保持姿态稳定。
   expected_output: >-
     一个 JSON 分镜表（已通过文件工具写入 storyboard.json）：characters 数组
     每项含 id、name、description（固定英文外观描述）；shots 数组每项含 id、

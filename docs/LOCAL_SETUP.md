@@ -264,8 +264,12 @@ PROMPT2VID_SUBTITLE_STYLE=FontName=Microsoft YaHei,FontSize=18,Outline=1,MarginV
 ```
 
 **性能与复现（可选调优）**：
-- `COMFYUI_LTX_STEPS=10`（默认）与 `COMFYUI_T2I_STEPS=25`（默认）：
-  LTX 0.9.5 为蒸馏版，8-13 步即可，30 步只会白慢 2-3 倍；
+- `COMFYUI_LTX_STEPS` / `COMFYUI_LTX_CFG` 留空即可按模型自动选择：
+  distilled → cfg 1.0 / 8 步；13B dev → cfg 3.0 / 30 步；2B 0.9.5 →
+  cfg 3.0 / 10 步。手动设了才会覆盖自动档位；
+- `COMFYUI_T2I_STEPS`：SDXL 默认 25 步（dpmpp_2m）；
+- `COMFYUI_T2I_WIDTH` / `COMFYUI_T2I_HEIGHT`：首帧画幅，默认 768x1344；
+  视频画幅会自动跟随首帧宽高比并取 32 的倍数，避免人物被裁变形；
 - `PROMPT2VID_SEED=42`：固定种子跑对比实验（逐镜自动 +1）；
 - `PROMPT2VID_DIRECT_MEDIA=true` 或 CLI `--direct-media`：LLM 只做创意
   三阶段 + 发布，媒体阶段由代码直跑，每次 run 省 6 次 LLM 往返；

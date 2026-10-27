@@ -264,8 +264,11 @@ curl -X POST http://<pod-ip>:8081/a2a/jsonrpc \
 | `PROMPT2VID_LLM_BASE_URL` / `PROMPT2VID_LLM_API_KEY` | OpenAI 兼容网关地址与密钥 |
 | `PROMPT2VID_MODEL__SCRIPT_WRITER` | 按 agent 覆盖模型（agent 名大写、点换双下划线） |
 | `COMFYUI_URL` | ComfyUI 服务地址（本地默认 `http://127.0.0.1:8188`） |
-| `COMFYUI_T2I_CHECKPOINT` / `COMFYUI_LTX_CHECKPOINT` / `COMFYUI_T5` | ComfyUI 模型文件名 |
-| `COMFYUI_T2I_STEPS` / `COMFYUI_LTX_STEPS` | 采样步数（默认 25 / 10；LTX 0.9.5 蒸馏版 8-13 步即可） |
+| `COMFYUI_T2I_CHECKPOINT` / `COMFYUI_LTX_CHECKPOINT` / `COMFYUI_T5` | ComfyUI 模型文件名（5090/24GB+ 建议 `ltxv-13b-0.9.7-distilled-fp8`；2B 档已回退兜底） |
+| `COMFYUI_T2I_WIDTH` / `COMFYUI_T2I_HEIGHT` | 首帧画幅（默认 768x1344 竖屏；视频画幅会跟随首帧自动换算成 32 的倍数，避免人物被裁变形） |
+| `COMFYUI_T2I_STEPS` / `COMFYUI_LTX_STEPS` / `COMFYUI_LTX_CFG` | 采样步数/cfg（SDXL 默认 25；LTX 留空按模型自动：distilled → cfg 1.0 / 8 步，13B dev → cfg 3.0 / 30 步，2B → cfg 3.0 / 10 步） |
+| `COMFYUI_LTX_MAX_PIXELS` / `COMFYUI_LTX_WIDTH` / `COMFYUI_LTX_HEIGHT` | LTX 单帧像素预算（2B 默认 512x768，13B 自动 576x1024；可设 921600 上 720p）或显式固定画幅（32 倍数） |
+| `COMFYUI_LTX_PROMPT_SUFFIX` | 追加到 LTX 正向提示词的肢体稳定约束（默认 `consistent anatomy, natural body proportions, stable limbs, detailed hands`） |
 | `COMFYUI_RETRIES` | 单镜生成失败重试次数（默认 2，按批次重试） |
 | `COMFYUI_IPADAPTER` | true 时启用角色一致性参考注入（分镜表含 `characters` 时先生成角色定妆照，出镜分镜首帧注入参考；需 ComfyUI 装 ComfyUI_IPAdapter_plus + 两个模型，见 [docs/LOCAL_SETUP.md](docs/LOCAL_SETUP.md) 第 6 节；未就位时自动回退无参考生成） |
 | `COMFYUI_IPADAPTER_PRESET` / `COMFYUI_IPADAPTER_WEIGHT` | IPAdapter 预设与注入权重（默认 `PLUS FACE (portraits)` / 0.8） |

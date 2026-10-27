@@ -27,6 +27,7 @@ from .comfyui_client import (
     DEFAULT_LTX_CHECKPOINT,
     DEFAULT_T2I_CHECKPOINT,
     DEFAULT_T5,
+    combo_values,
     env_str,
 )
 from .ffmpeg_ops import resolve_tool
@@ -71,14 +72,8 @@ class PreflightResult:
 
 
 def _combo_values(node_spec: dict[str, Any], field_name: str) -> list[str]:
-    """从 object_info 的节点定义里取 combo 候选值（兼容 list / dict 两种格式）。"""
-    raw = node_spec.get("input", {}).get(field_name, [])
-    if isinstance(raw, dict):
-        for key in ("value", "values", "options"):
-            if isinstance(raw.get(key), list):
-                return [str(v) for v in raw[key]]
-        return []
-    return [str(v) for v in raw] if isinstance(raw, list) else []
+    """从 object_info 的节点定义里取 combo 候选值（兼容各版 schema）。"""
+    return combo_values(node_spec, field_name)
 
 
 def _fetch_node_info(client: httpx.Client, node: str, base_url: str) -> dict[str, Any]:
