@@ -25,12 +25,12 @@
 | 3 | `t5xxl_fp8_e4m3fn.safetensors` | ~4.9GB | `models/text_encoders/` | 视频阶段的文字编码器（必须 fp8 版，fp16 版会 OOM） | `COMFYUI_T5` |
 | 4（可选） | `ip-adapter-plus-face_sdxl_vit-h.safetensors` | ~0.5GB | `models/ipadapter/` | 角色一致性：参考注入适配器 | 无需配置（节点按预设名自动加载） |
 | 5（可选） | `CLIP-ViT-H-14-laion2B-s32B-b79K.safetensors` | ~2.5GB | `models/clip_vision/` | 角色一致性：参考图的图像编码器 | 无需配置 |
-| 6（可选） | `anime.safetensors` | ~48MB | `models/loras/` | 全片动漫风格（文生图 LoRA，各档位推荐见 §七与 `.env.<档位>`） | `COMFYUI_T2I_LORA` |
+| 6（可选） | `anime.safetensors` | ~48MB | `models/loras/` | 全片动漫风格（文生图 LoRA，各档位推荐见 §九与 `.env.<档位>`） | `COMFYUI_T2I_LORA` |
 
 前 3 个必装（约 13.8GB）；4、5 只在想开启角色一致性时才装（约 3GB）；
 6 只在固定动漫风格时才装（48MB，文件缺失会自动降级为纯提示词风格约束）。
 下载命令（hf-mirror 镜像，PowerShell）见 [LOCAL_SETUP.md](LOCAL_SETUP.md)
-§3.3 与 §6.2，可直接复制。
+§3.3 与 §6.2，可直接复制；**LoRA 按显卡档位的下载清单见 §九**。
 
 > 风格固定不依赖任何文件：`.env` 里 `PROMPT2VID_STYLE=anime` 即可让分镜
 > 提示词与画面描述全部按动漫风格生成；LoRA（文件 #6）是在此基础上再叠
@@ -139,6 +139,8 @@ mkdir -p "$MODELS"/{checkpoints,text_encoders,ipadapter,clip_vision,loras}
 | ⑤ | 视频文本编码 | `t5xxl_fp8_e4m3fn.safetensors`（标准档已有则跳过） | 4.9GB |
 | ⑥ | 文生图动漫风格 LoRA | `anime.safetensors` | 48MB |
 | ⑦ | 视频动漫风格 LoRA（13B） | `shinkai-anime-style-lora-v1_58000.safetensors` | 812MB |
+
+> ⑥⑦ 两个 LoRA 按**显卡档位**的下载速查（含 4060 本地档）见 §九。
 
 ### 7.3 下载命令
 
@@ -480,11 +482,97 @@ prompt2vid --check-only
 > 先重连隧道再跑，不需要改任何代码或 k8s 清单。云机关机后隧道也会失效，
 > 重新开机后主机名/端口可能变化，记得同步更新 `.env` 与隧道命令。
 
+## 九、各显卡档位 LoRA 风格模型下载清单（速查）
+
+> 用途：`PROMPT2VID_STYLE=anime` 是提示词层的风格约束（不需要任何文件）；
+> LoRA 是在其上再叠一层**模型级**的动漫风格拉力。三份档位配置
+> `.env.4060` / `.env.4090` / `.env.5090` 已写好对应变量，按本节把文件
+> 放进 ComfyUI 的 `models/loras/` 即可，无需再改配置。本节的两个文件与
+> §7.2 清单里的 ⑥⑦ 是同一批文件，此处按**显卡档位**汇总便于对号入座。
+
+### 9.1 按档位的下载清单
+
+| 档位（配置文件） | 底部模型 | 文生图 LoRA（必下） | 视频侧 LoRA | 合计下载 |
+|---|---|---|---|---|
+| **4060 本地档**（`.env.4060`，8GB） | SDXL Base + LTX 2B | `anime.safetensors`（48MB） | 无——LTX 2B 没有现成动漫 LoRA，视频风格由动漫首帧 + 提示词约束传递 | 1 个文件，约 48MB |
+| **4090 高质量档**（`.env.4090`，24GB） | RealVisXL + LTX 13B | `anime.safetensors`（48MB） | `shinkai-anime-style-lora-v1_58000.safetensors`（812MB） | 2 个文件，约 860MB |
+| **5090 最高档**（`.env.5090`，32GB） | 同 4090 | `anime.safetensors`（48MB） | `shinkai-anime-style-lora-v1_58000.safetensors`（812MB） | 2 个文件，约 860MB |
+
+涉及的 2 个文件（HF 仓库与文件名均已对照 hf-mirror 核实）：
+
+| 文件名（必须一字不差） | HF 仓库 | 放置路径 | 说明 |
+|---|---|---|---|
+| `anime.safetensors` | `ntc-ai/SDXL-LoRA-slider.anime` | `models/loras/` | SDXL Base 1.0 上训练的动漫概念滑块，三档通用（8GB 显存也无压力） |
+| `shinkai-anime-style-lora-v1_58000.safetensors` | `Cseti/ltxv-13b-shinkai-anime-style-lora-v1` | `models/loras/` | LTX-Video 13B 新海诚动漫风格；触发词 `sh1nka1 style` |
+
+### 9.2 本地 4060（PowerShell）
+
+```powershell
+$env:HF_ENDPOINT = "https://hf-mirror.com"   # 国内镜像
+# 文生图动漫滑块 LoRA → models/loras/
+huggingface-cli download ntc-ai/SDXL-LoRA-slider.anime `
+  anime.safetensors `
+  --local-dir "D:\ComfyUI_windows_portable\ComfyUI\models\loras"
+```
+
+### 9.3 云机 4090 / 5090（bash，两个文件都下）
+
+```bash
+export HF_ENDPOINT=https://hf-mirror.com
+MODELS=/root/autodl-tmp/ComfyUI/models   # ← 改成你的 ComfyUI models 实际路径
+
+# ① 文生图动漫滑块 LoRA（写实系 RealVisXL 底模上把画面拉向动漫）
+huggingface-cli download ntc-ai/SDXL-LoRA-slider.anime \
+  anime.safetensors \
+  --local-dir "$MODELS/loras"
+
+# ② LTX 13B 新海诚动漫风格 LoRA（视频侧）
+huggingface-cli download Cseti/ltxv-13b-shinkai-anime-style-lora-v1 \
+  shinkai-anime-style-lora-v1_58000.safetensors \
+  --local-dir "$MODELS/loras"
+
+# 下载后验证
+ls -lh "$MODELS/loras/"
+# 预期看到：
+#   loras/anime.safetensors                                 48M
+#   loras/shinkai-anime-style-lora-v1_58000.safetensors    812M
+```
+
+### 9.4 对应的 .env 变量（三份档位配置已写好，此处仅供对照）
+
+```ini
+# 三档共用（.env / .env.4060 / .env.4090 / .env.5090 均已配置）
+PROMPT2VID_STYLE=anime            # 提示词层风格约束，不需要下载任何文件
+COMFYUI_T2I_LORA=anime.safetensors
+COMFYUI_T2I_LORA_STRENGTH=1.5     # 滑块类 LoRA 建议 1.0-2.0，风格不够再调高
+
+# 仅 4090 / 5090 档（.env.4090 / .env.5090 已配置）
+COMFYUI_LTX_LORA=shinkai-anime-style-lora-v1_58000.safetensors
+COMFYUI_LTX_LORA_STRENGTH=0.8     # 5090 档已设 0.9（显存富余可再调高）
+```
+
+### 9.5 注意事项
+
+- **下载后验证**：`prompt2vid --check-only --env-file 4090`（或 `4060` / `5090`），
+  预检报告会出现「T2I LoRA / LTX LoRA」检查项（可选项，NG 不拦截运行），
+  直接确认文件是否就位；
+- **漏下不报错**：LoRA 缺失或文件名不一致时，运行期告警并自动降级为
+  无 LoRA 生成（`PROMPT2VID_STYLE` 的提示词约束仍在），流水线不中断；
+- **4090 / 5090 可选增强**（是 checkpoint，不是 LoRA）：写实系 RealVisXL
+  底模会往照片感拉扯，想要更纯的动漫风可再下 `cagliostrolab/animagine-xl-3.1`
+  的 `animagine-xl-3.1.safetensors`（6.9GB，放 `models/checkpoints/`），把
+  `COMFYUI_T2I_CHECKPOINT` 改成它，与滑块 LoRA 叠用；
+- **新海诚 LoRA 兼容性**：它基于 LTX-Video 13B 训练，在 13B distilled fp8
+  底模上未经官方验证；若 clips 阶段整批失败，清空 `COMFYUI_LTX_LORA` 或
+  换 13B dev 底模再试。想强化其效果，可打开 `.env` 里的
+  `COMFYUI_LTX_PROMPT_SUFFIX=sh1nka1 style, consistent anatomy, natural body proportions, stable limbs, detailed hands`
+  注入触发词（`.env.4090` / `.env.5090` 注释里有现成写法）。
+
 ## 一句话总结
 
-**ComfyUI 侧的全部工作 = 放 3（~5）个文件 + （可选）clone 一个节点包 +
-启动**，其余由项目代码通过 API 完成；`prompt2vid --check-only` 是验证配置
-是否正确的唯一入口。
+**ComfyUI 侧的全部工作 = 放 3（~5）个文件 +（可选）动漫风格再放 1~2 个
+LoRA +（可选）clone 一个节点包 + 启动**，其余由项目代码通过 API 完成；
+`prompt2vid --check-only` 是验证配置是否正确的唯一入口。
 
 
 
