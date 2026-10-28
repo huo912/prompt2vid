@@ -1,7 +1,7 @@
 """CLI 入口：python -m prompt2vid.main "一句话描述"。
 
 执行流程：
-1. 加载 .env，解析参数；
+1. 解析参数，加载环境配置（.env 或 --env-file 指定的档位配置）；
 2. 预检环境（ComfyUI 可达、模型就位、ffmpeg 可用）——把配置错误
    拦截在启动阶段，而不是流水线跑到一半才失败；
 3. 创建 output/run_<时间戳> 工作目录并写入 PROMPT2VID_WORKSPACE；
@@ -11,6 +11,7 @@
 常用命令：
     prompt2vid "做一个关于秋天的治愈系短视频"          # 全流程
     prompt2vid "..." --direct-media                    # 直连媒体模式（省 6 次 LLM 往返）
+    prompt2vid --env-file .env.4090 "..."              # 切换 GPU 档位配置（简名 --env-file 4090 亦可）
     prompt2vid --check-only                            # 只做环境预检
     prompt2vid --list-steps                            # 查看可分步执行的步骤 id
     prompt2vid "..." --only plan_storyboard            # 只执行指定步骤（分步调试）
@@ -68,6 +69,13 @@ def main(argv: list[str] | None = None) -> int:
         description="一句话描述 → 自动生成视频并发布到抖音",
     )
     parser.add_argument("prompt", nargs="?", help="视频内容的一句话描述")
+    parser.add_argument(
+        "--env-file",
+        default=None,
+        metavar="FILE",
+        help="指定环境配置文件（路径或档位简名，如 .env.4090 或 4090；"
+             "默认 .env，档位见项目根目录 .env.4060 / .env.4090 / .env.5090）",
+    )
     parser.add_argument(
         "--workspace",
         default=None,
@@ -144,9 +152,15 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    from dotenv import load_dotenv
+    from .env_config import load_env
 
-    load_dotenv()
+    try:
+        env_path = load_env(args.env_file)
+    except FileNotFoundError as exc:
+        print(f"错误: {exc}")
+        return 2
+    if args.env_file:
+        print(f"已加载环境配置: {env_path}")
 
     if args.clean:
         from .pipeline import clean_outputs, trim_publish_state

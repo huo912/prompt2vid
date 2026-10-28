@@ -175,10 +175,16 @@ class Prompt2VidExecutor(AgentExecutor):
             await updater.cancel()
 
 
-def serve(host: str = "0.0.0.0", port: int | None = None) -> None:
+def serve(host: str = "0.0.0.0", port: int | None = None, env_file: str | None = None) -> None:
     """启动 A2A 服务器。"""
     if port is None:
         port = _resolve_port()
+
+    # 环境配置：--env-file 显式指定，否则 PROMPT2VID_ENV_FILE /
+    # PROMPT2VID_PROFILE（k8s/systemd 注入），最后默认 .env
+    from .env_config import load_env
+
+    load_env(env_file)
 
     agent_card = _load_agent_card()
     request_handler = DefaultRequestHandler(
@@ -222,9 +228,15 @@ def main() -> None:
     parser = argparse.ArgumentParser(prog="prompt2vid-server")
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=None)
+    parser.add_argument(
+        "--env-file",
+        default=None,
+        metavar="FILE",
+        help="指定环境配置文件（路径或档位简名，如 .env.4090 或 4090；默认 .env）",
+    )
     args = parser.parse_args()
     with contextlib.suppress(KeyboardInterrupt):
-        serve(host=args.host, port=args.port)
+        serve(host=args.host, port=args.port, env_file=args.env_file)
 
 
 if __name__ == "__main__":

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from prompt2vid.comfyui_client import (
     build_i2v_workflow,
     build_t2i_workflow,
@@ -13,6 +15,23 @@ from prompt2vid.comfyui_client import (
     ltx_max_pixels,
     ltx_sampling_defaults,
 )
+
+
+@pytest.fixture(autouse=True)
+def _no_style_no_lora(monkeypatch):
+    """基线：风格与 LoRA 关闭，保证既有精确断言不受本机 .env 影响。
+
+    其他测试（如 test_crew_assembly）可能把仓库 .env 加载进 os.environ，
+    其中含 PROMPT2VID_STYLE / COMFYUI_*_LORA。
+    """
+    for name in (
+        "PROMPT2VID_STYLE",
+        "COMFYUI_T2I_LORA",
+        "COMFYUI_T2I_LORA_STRENGTH",
+        "COMFYUI_LTX_LORA",
+        "COMFYUI_LTX_LORA_STRENGTH",
+    ):
+        monkeypatch.delenv(name, raising=False)
 
 
 def test_t2i_workflow_structure():
@@ -171,7 +190,13 @@ _NODE_OUTPUT_SLOTS = {
     "CLIPLoader": 1,
     "CLIPTextEncode": 1,
     "CheckpointLoaderSimple": 3,
+    "EmptyLatentImage": 1,
+    "IPAdapter": 1,
+    "IPAdapterUnifiedLoader": 2,
+    "KSampler": 1,
     "LoadImage": 2,
+    "LoraLoader": 2,
+    "LoraLoaderModelOnly": 1,
     "LTXVPreprocess": 1,
     "LTXVImgToVideo": 3,
     "LTXVConditioning": 2,
@@ -179,6 +204,7 @@ _NODE_OUTPUT_SLOTS = {
     "KSamplerSelect": 1,
     "SamplerCustom": 2,
     "VAEDecode": 1,
+    "SaveImage": 0,
     "SaveWEBM": 0,
 }
 
@@ -264,3 +290,129 @@ def test_ipadapter_enabled(monkeypatch):
     for value in ("", "0", "false", "off"):
         monkeypatch.setenv("COMFYUI_IPADAPTER", value)
         assert ipadapter_enabled() is False
+
+
+# ------------------------------------------------------------ 固定风格约束
+
+def test_t2i_workflow_applies_style(monkeypatch):
+    """PROMPT2VID_STYLE=anime：正向追加风格词，负向追加排斥词。"""
+    monkeypatch.setenv("PROMPT2VID_STYLE", "anime")
+    wf = build_t2i_workflow(prompt="a cat", negative_prompt="", seed=1)
+    assert wf["6"]["inputs"]["text"].startswith("a cat, ")
+    assert "anime style" in wf["6"]["inputs"]["text"]
+    # 负向：默认词保留 + 风格排斥词追加
+    assert "bad anatomy" in wf["7"]["inputs"]["text"]
+    assert "photorealistic" in wf["7"]["inputs"]["text"]
+
+
+def test_i2v_workflow_applies_style(monkeypatch):
+    monkeypatch.setenv("PROMPT2VID_STYLE", "anime")
+    wf = build_i2v_workflow("x.png", "a cat, slow zoom in")
+    assert "anime style" in wf["6"]["inputs"]["text"]
+    assert "a cat, slow zoom in" in wf["6"]["inputs"]["text"]
+    assert "3d render" in wf["7"]["inputs"]["text"]
+
+
+def test_workflow_style_disabled_by_default():
+    """未配置风格时提示词原样进入工作流（向后兼容）。"""
+    wf = build_t2i_workflow(prompt="a cat", seed=1)
+    assert wf["6"]["inputs"]["text"] == "a cat"
+    assert "photorealistic" not in wf["7"]["inputs"]["text"]
+
+
+# ------------------------------------------------------------ LoRA 风格模型
+
+def test_t2i_workflow_with_lora_param():
+    """显式传 LoRA 名：插入 LoraLoader，文本编码与采样器接到 LoRA 之后。"""
+    wf = build_t2i_workflow(prompt="a", seed=1, lora="anime.safetensors")
+    assert wf["lora"]["class_type"] == "LoraLoader"
+    assert wf["lora"]["inputs"]["lora_name"] == "anime.safetensors"
+    assert wf["lora"]["inputs"]["strength_model"] == 0.8  # 默认权重
+    assert wf["lora"]["inputs"]["strength_clip"] == 0.8
+    assert wf["lora"]["inputs"]["model"] == ["44", 0]
+    assert wf["lora"]["inputs"]["clip"] == ["44", 1]
+    # 连线改接 LoRA 输出
+    assert wf["6"]["inputs"]["clip"] == ["lora", 1]
+    assert wf["7"]["inputs"]["clip"] == ["lora", 1]
+    assert wf["3"]["inputs"]["model"] == ["lora", 0]
+    # VAE 仍来自 checkpoint
+    assert wf["8"]["inputs"]["vae"] == ["44", 2]
+
+
+def test_t2i_workflow_lora_from_env_and_strength(monkeypatch):
+    monkeypatch.setenv("COMFYUI_T2I_LORA", "anime.safetensors")
+    monkeypatch.setenv("COMFYUI_T2I_LORA_STRENGTH", "1.5")
+    wf = build_t2i_workflow(prompt="a", seed=1)
+    assert wf["lora"]["inputs"]["lora_name"] == "anime.safetensors"
+    assert wf["lora"]["inputs"]["strength_model"] == 1.5
+
+
+def test_t2i_workflow_lora_empty_string_disables(monkeypatch):
+    """空串（resolve_lora 降级的返回值）= 显式关闭 LoRA，不读环境变量。"""
+    monkeypatch.setenv("COMFYUI_T2I_LORA", "anime.safetensors")
+    wf = build_t2i_workflow(prompt="a", seed=1, lora="")
+    assert "lora" not in wf
+    assert wf["3"]["inputs"]["model"] == ["44", 0]
+
+
+def test_t2i_workflow_lora_plus_reference_chain():
+    """LoRA 与 IPAdapter 叠加：Checkpoint → LoRA → IPAdapter → KSampler。"""
+    wf = build_t2i_workflow(
+        prompt="a",
+        seed=1,
+        lora="anime.safetensors",
+        reference={"image_name": "ref.png"},
+    )
+    assert wf["lora"]["class_type"] == "LoraLoader"
+    assert wf["ref_loader"]["class_type"] == "IPAdapterUnifiedLoader"
+    # IPAdapter 接 LoRA 之后的 MODEL，而不是 checkpoint 直出
+    assert wf["ref_loader"]["inputs"]["model"] == ["lora", 0]
+    # 文本编码仍接 LoRA 的 CLIP
+    assert wf["6"]["inputs"]["clip"] == ["lora", 1]
+    assert wf["3"]["inputs"]["model"] == ["ref_apply", 0]
+
+
+def test_i2v_workflow_with_lora_param():
+    """视频侧 LoRA：LoraLoaderModelOnly 只接 MODEL，SamplerCustom 接其后。"""
+    wf = build_i2v_workflow(
+        "x.png", "a", width=512, height=768, lora="shinkai.safetensors"
+    )
+    assert wf["lora"]["class_type"] == "LoraLoaderModelOnly"
+    assert wf["lora"]["inputs"]["lora_name"] == "shinkai.safetensors"
+    assert wf["lora"]["inputs"]["strength_model"] == 0.8
+    assert wf["lora"]["inputs"]["model"] == ["44", 0]
+    assert wf["72"]["inputs"]["model"] == ["lora", 0]
+    # T5 文本编码不经 LoRA（LTX 的 CLIP 由独立 CLIPLoader 提供）
+    assert wf["6"]["inputs"]["clip"] == ["38", 0]
+
+
+def test_i2v_workflow_lora_from_env(monkeypatch):
+    monkeypatch.setenv("COMFYUI_LTX_LORA", "shinkai.safetensors")
+    monkeypatch.setenv("COMFYUI_LTX_LORA_STRENGTH", "0.9")
+    wf = build_i2v_workflow("x.png", "a", width=512, height=768)
+    assert wf["lora"]["inputs"]["lora_name"] == "shinkai.safetensors"
+    assert wf["lora"]["inputs"]["strength_model"] == 0.9
+    assert wf["72"]["inputs"]["model"] == ["lora", 0]
+
+
+def test_workflow_links_within_slots_with_lora():
+    """挂上 LoRA / 风格后的工作流连线也必须落在真实输出槽内。"""
+    for wf in (
+        build_t2i_workflow("a", lora="anime.safetensors"),
+        build_t2i_workflow(
+            "a", lora="anime.safetensors", reference={"image_name": "ref.png"}
+        ),
+        build_i2v_workflow("x.png", "a", lora="shinkai.safetensors"),
+    ):
+        for node_id, node in wf.items():
+            assert node["class_type"] in _NODE_OUTPUT_SLOTS, node["class_type"]
+            for name, value in node["inputs"].items():
+                if not (isinstance(value, list) and len(value) == 2):
+                    continue
+                src_id, slot = value
+                src_class = wf[src_id]["class_type"]
+                slots = _NODE_OUTPUT_SLOTS[src_class]
+                assert slot < slots, (
+                    f"节点 {node_id}({node['class_type']}).{name} 引用了 "
+                    f"{src_id}({src_class}) 的输出槽 {slot}，但该节点只有 {slots} 个输出"
+                )

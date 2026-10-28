@@ -9,9 +9,10 @@ from urllib.parse import urlparse
 
 import yaml
 from crewai import Agent, Crew, Process, Task
-from dotenv import load_dotenv
 
 from .dynamic_llm import build_llm
+from .env_config import load_env
+from .style import storyboard_style_hint
 
 # agent 名 → 工具模块列表（prompt2vid.tools 下的模块名）
 # 默认取模块的 TOOLS 属性；也可用 "module:ATTR" 语法指定其他导出
@@ -42,6 +43,10 @@ TASK_ORDER: list[str] = [
     "inspect_quality",
     "publish_douyin",
 ]
+
+# 需要注入风格约束的任务：分镜表是 image_prompt 的唯一来源，
+# 风格（PROMPT2VID_STYLE）从这里开始约束 LLM 的画面组织方式
+STYLE_CONSTRAINED_TASKS = ("plan_storyboard",)
 
 
 def _bypass_proxy_for_internal_hosts() -> None:
@@ -157,14 +162,20 @@ def build_tasks(
         raise ValueError(f"未知任务: {unknown}（可选: {', '.join(TASK_ORDER)}）")
 
     tasks: list[Task] = []
+    style_hint = storyboard_style_hint()
     for name in order:
         spec = specs[name]
         agent_name = spec["agent"]
         if agent_name not in agents:
             raise ValueError(f"任务 {name} 引用了未知 agent: {agent_name}")
+        description = spec["description"]
+        if style_hint and name in STYLE_CONSTRAINED_TASKS:
+            # 全片风格固定（PROMPT2VID_STYLE）：生成阶段在提示词层还会
+            # 硬性追加风格词，这里让分镜 LLM 写画面描述时就与之对齐
+            description += style_hint
         tasks.append(
             Task(
-                description=spec["description"],
+                description=description,
                 expected_output=spec["expected_output"],
                 agent=agents[agent_name],
             )
@@ -179,7 +190,9 @@ def build_crew(task_names: list[str] | None = None) -> Crew:
         task_names: 只包含指定任务（用于直接媒体模式分段执行）；
             缺省构建全流程（9 任务）。
     """
-    load_dotenv()
+    # 幂等：CLI 已用 --env-file 指定档位时保持不变，否则按
+    # PROMPT2VID_ENV_FILE / PROMPT2VID_PROFILE / 默认 .env 解析
+    load_env()
     _bypass_proxy_for_internal_hosts()
     config_dir = _find_config_dir()
     agents = build_agents(config_dir)

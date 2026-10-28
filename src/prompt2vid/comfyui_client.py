@@ -24,6 +24,8 @@ from typing import Any
 
 import httpx
 
+from .style import apply_style, apply_style_negative
+
 logger = logging.getLogger("prompt2vid.comfyui")
 
 DEFAULT_COMFYUI_URL = "http://127.0.0.1:8188"
@@ -57,6 +59,13 @@ _T2I_CHECKPOINT_HINTS = (
     "realvis", "sd_xl", "sdxl", "juggernaut", "dreamshaper", "pony", "illustrious",
 )
 CHECKPOINT_LOADER = "CheckpointLoaderSimple"
+
+# LoRA：文生图用 LoraLoader（model + clip 双输出），视频用
+# LoraLoaderModelOnly——LTX checkpoint 不带 CLIP（T5 单独经 CLIPLoader
+# 加载），接不了 LoraLoader 的 clip 输入。
+LORA_LOADER = "LoraLoader"
+LORA_MODEL_ONLY_LOADER = "LoraLoaderModelOnly"
+DEFAULT_LORA_STRENGTH = 0.8
 
 DEFAULT_T2I_NEGATIVE = (
     "low quality, worst quality, deformed, distorted, disfigured, "
@@ -353,6 +362,7 @@ class ComfyUIClient:
     def __init__(self, base_url: str | None = None, http: httpx.Client | None = None) -> None:
         self.base_url = (base_url or env_str("COMFYUI_URL", DEFAULT_COMFYUI_URL)).rstrip("/")
         self._http = http or httpx.Client(timeout=30.0)
+        # 已解析的模型文件名缓存（role → 文件名；LoRA 的空串表示"已确认关闭"）
         self._checkpoint_cache: dict[str, str] = {}
 
     def close(self) -> None:
@@ -442,6 +452,43 @@ class ComfyUIClient:
         usable = [c for c in candidates if "ltx" not in c.lower()]
         usable.sort(key=lambda c: (score(c), c))
         return usable
+
+    def available_loras(self, model_only: bool = False) -> list[str]:
+        """ComfyUI 当前可用的 LoRA 文件名（查询失败时为空列表）。"""
+        node = LORA_MODEL_ONLY_LOADER if model_only else LORA_LOADER
+        spec = self.object_info(node).get(node) or {}
+        return combo_values(spec, "lora_name")
+
+    def resolve_lora(self, role: str = "t2i") -> str:
+        """返回该档位应使用的 LoRA 文件名；不可用时告警并返回空串（关闭）。
+
+        与 checkpoint 不同，LoRA 是风格增强件：文件缺失 / 名字与服务端
+        不一致时降级为无 LoRA 生成，不让整条流水线失败。也不会自动挑
+        别的 LoRA 顶替——风格是刻意配置，静默换一个等于换风格。
+
+        Args:
+            role: "t2i"（读 COMFYUI_T2I_LORA）或 "ltx"（读 COMFYUI_LTX_LORA）。
+        """
+        cache_key = f"{role}_lora"
+        if cache_key in self._checkpoint_cache:
+            return self._checkpoint_cache[cache_key]
+        if role == "ltx":
+            requested = env_str("COMFYUI_LTX_LORA", "")
+            model_only = True
+        else:
+            requested = env_str("COMFYUI_T2I_LORA", "")
+            model_only = False
+        chosen = requested
+        if requested:
+            candidates = self.available_loras(model_only)
+            if candidates and requested not in candidates:
+                logger.warning(
+                    "ComfyUI: %s LoRA %s 不可用，本次不挂 LoRA（服务端可用: %s）",
+                    role, requested, ", ".join(candidates[:8]),
+                )
+                chosen = ""
+        self._checkpoint_cache[cache_key] = chosen
+        return chosen
 
     def submit(self, workflow: dict[str, Any]) -> str:
         """提交工作流，返回 prompt_id。"""
@@ -560,24 +607,34 @@ def build_t2i_workflow(
     seed: int | None = None,
     reference: dict[str, Any] | None = None,
     checkpoint: str | None = None,
+    lora: str | None = None,
 ) -> dict[str, Any]:
     """SDXL 文生图工作流（API 格式）。
 
-    节点链：CheckpointLoaderSimple → CLIPTextEncode(正/负) →
+    节点链：CheckpointLoaderSimple → [LoraLoader] → CLIPTextEncode(正/负) →
     EmptyLatentImage → KSampler → VAEDecode → SaveImage
 
     Args:
         checkpoint: 覆盖 `COMFYUI_T2I_CHECKPOINT` / 默认值；调用方通常传
             `ComfyUIClient.resolve_checkpoint("t2i")` 的返回值，以适配云机上
             实际存在的模型文件名。
+        lora: 覆盖 `COMFYUI_T2I_LORA`（空串 = 不挂 LoRA）；通常传
+            `ComfyUIClient.resolve_lora("t2i")` 的返回值。权重读
+            COMFYUI_T2I_LORA_STRENGTH（默认 0.8）。
         reference: 角色参考图注入（IPAdapter）。传 {"image_name": 已上传的
             参考图名} 即可，weight/preset 缺省读 COMFYUI_IPADAPTER_WEIGHT /
             COMFYUI_IPADAPTER_PRESET。节点链变为：
-            CheckpointLoader → IPAdapterUnifiedLoader → IPAdapter(参考图)
-            → KSampler，需要 ComfyUI 安装 ComfyUI_IPAdapter_plus。
+            CheckpointLoader → LoraLoader → IPAdapterUnifiedLoader →
+            IPAdapter(参考图) → KSampler，需要 ComfyUI 安装
+            ComfyUI_IPAdapter_plus。
+
+    风格约束（PROMPT2VID_STYLE，见 style.py）：正向提示词自动追加风格
+    正向词、负向提示词自动追加风格排斥词，调用方无需自行拼接。
     """
     ckpt = checkpoint or env_str("COMFYUI_T2I_CHECKPOINT", DEFAULT_T2I_CHECKPOINT)
+    styled_prompt = apply_style(prompt)
     negative = negative_prompt or env_str("COMFYUI_NEGATIVE_PROMPT", DEFAULT_T2I_NEGATIVE)
+    negative = apply_style_negative(negative)
     if width is None or height is None:
         default_width, default_height = default_t2i_size()
         width = default_width if width is None else width
@@ -589,7 +646,7 @@ def build_t2i_workflow(
         },
         "6": {
             "class_type": "CLIPTextEncode",
-            "inputs": {"text": prompt, "clip": ["44", 1]},
+            "inputs": {"text": styled_prompt, "clip": ["44", 1]},
         },
         "7": {
             "class_type": "CLIPTextEncode",
@@ -623,15 +680,39 @@ def build_t2i_workflow(
             "inputs": {"images": ["8", 0], "filename_prefix": "prompt2vid"},
         },
     }
+    # LoRA 链在 checkpoint 之后、文本编码与采样之前（IPAdapter 之前）：
+    # 文本编码器用 LoRA 之后的 CLIP，采样器用 LoRA 之后的 MODEL
+    model_src: list[Any] = ["44", 0]
+    lora_name = lora if lora is not None else env_str("COMFYUI_T2I_LORA", "")
+    if lora_name:
+        strength = env_float("COMFYUI_T2I_LORA_STRENGTH", DEFAULT_LORA_STRENGTH)
+        workflow["lora"] = {
+            "class_type": LORA_LOADER,
+            "inputs": {
+                "lora_name": lora_name,
+                "strength_model": strength,
+                "strength_clip": strength,
+                "model": ["44", 0],
+                "clip": ["44", 1],
+            },
+        }
+        model_src = ["lora", 0]
+        for text_node in ("6", "7"):
+            workflow[text_node]["inputs"]["clip"] = ["lora", 1]
     if reference and reference.get("image_name"):
-        workflow["3"]["inputs"]["model"] = _apply_ipadapter(workflow, reference)
+        workflow["3"]["inputs"]["model"] = _apply_ipadapter(workflow, reference, model_src)
+    elif lora_name:
+        workflow["3"]["inputs"]["model"] = model_src
     return workflow
 
 
 def _apply_ipadapter(
-    workflow: dict[str, Any], reference: dict[str, Any]
+    workflow: dict[str, Any], reference: dict[str, Any], model_src: list[Any]
 ) -> list[Any]:
     """注入 IPAdapter 参考图节点链，返回 KSampler 应使用的 MODEL 输出。
+
+    model_src 是 IPAdapter 之前的 MODEL 来源（checkpoint 直出，或经过
+    LoRA 之后的输出），保证 LoRA 与 IPAdapter 可以叠加。
 
     节点签名对照 ComfyUI_IPAdapter_plus（cubiq）当前版本；未安装该
     自定义节点或模型时 ComfyUI 会拒绝工作流，由调用方（stages 的
@@ -649,7 +730,7 @@ def _apply_ipadapter(
     }
     workflow["ref_loader"] = {
         "class_type": "IPAdapterUnifiedLoader",
-        "inputs": {"model": ["44", 0], "ipadapter": preset},
+        "inputs": {"model": model_src, "ipadapter": preset},
     }
     workflow["ref_apply"] = {
         "class_type": "IPAdapter",
@@ -675,13 +756,14 @@ def build_i2v_workflow(
     length: int = 41,
     seed: int | None = None,
     checkpoint: str | None = None,
+    lora: str | None = None,
 ) -> dict[str, Any]:
     """LTX-Video 图生视频工作流（API 格式）。
 
     节点链（对照官方 ltxv_image_to_video_simple.0.9.5.json）：
     CLIPLoader(T5) → CLIPTextEncode(正/负) → LTXVImgToVideo → LTXVConditioning →
     SamplerCustom ← KSamplerSelect(euler) + LTXVScheduler；
-    CheckpointLoaderSimple(LTX) 提供 MODEL/VAE；
+    CheckpointLoaderSimple(LTX) → [LoraLoaderModelOnly] 提供 MODEL；VAE；
     LoadImage → LTXVPreprocess；VAEDecode → SaveWEBM
 
     Args:
@@ -692,6 +774,14 @@ def build_i2v_workflow(
             `ComfyUIClient.resolve_checkpoint("ltx")` 的返回值。cfg/步数
             会按模型档位自动选择（distilled：cfg 1.0 / 8 步；13B dev：
             cfg 3.0 / 30 步；2B：cfg 3.0 / 10 步）。
+        lora: 覆盖 `COMFYUI_LTX_LORA`（空串 = 不挂 LoRA）；通常传
+            `ComfyUIClient.resolve_lora("ltx")` 的返回值。LTX checkpoint
+            不带 CLIP，所以用只接 MODEL 的 LoraLoaderModelOnly。权重读
+            COMFYUI_LTX_LORA_STRENGTH（默认 0.8）。
+
+    风格约束（PROMPT2VID_STYLE，见 style.py）：正向提示词自动追加风格
+    正向词、负向提示词自动追加风格排斥词——视频风格跟随首帧之余，
+    提示词层再钉一次风格。
     """
     ltx_ckpt = checkpoint or env_str("COMFYUI_LTX_CHECKPOINT", DEFAULT_LTX_CHECKPOINT)
     if width is None or height is None:
@@ -704,8 +794,16 @@ def build_i2v_workflow(
     img_compression = env_int("COMFYUI_LTX_IMG_COMPRESSION", 35)
     t5 = env_str("COMFYUI_T5", DEFAULT_T5)
     t5_device = env_str("COMFYUI_T5_DEVICE", DEFAULT_T5_DEVICE)
+    styled_prompt = apply_style(prompt)
     negative = negative_prompt or env_str("COMFYUI_LTX_NEGATIVE_PROMPT", DEFAULT_LTX_NEGATIVE)
-    return {
+    negative = apply_style_negative(negative)
+    # LoRA 只接 MODEL（LTX checkpoint 的 CLIP 输出为空，接 LoraLoader 会
+    # 在预校验阶段被拒）
+    model_src: list[Any] = ["44", 0]
+    lora_name = lora if lora is not None else env_str("COMFYUI_LTX_LORA", "")
+    if lora_name:
+        model_src = ["lora", 0]
+    workflow = {
         # T5 文本编码器（fp8 放 text_encoders，device=cpu 省显存）
         "38": {
             "class_type": "CLIPLoader",
@@ -717,7 +815,7 @@ def build_i2v_workflow(
         },
         "6": {
             "class_type": "CLIPTextEncode",
-            "inputs": {"text": prompt, "clip": ["38", 0]},
+            "inputs": {"text": styled_prompt, "clip": ["38", 0]},
         },
         "7": {
             "class_type": "CLIPTextEncode",
@@ -779,7 +877,7 @@ def build_i2v_workflow(
                 "add_noise": True,
                 "noise_seed": seed if seed is not None else next_seed(),
                 "cfg": cfg,
-                "model": ["44", 0],
+                "model": model_src,
                 "positive": ["69", 0],
                 "negative": ["69", 1],
                 "sampler": ["73", 0],
@@ -806,6 +904,18 @@ def build_i2v_workflow(
             },
         },
     }
+    if lora_name:
+        workflow["lora"] = {
+            "class_type": LORA_MODEL_ONLY_LOADER,
+            "inputs": {
+                "lora_name": lora_name,
+                "strength_model": env_float(
+                    "COMFYUI_LTX_LORA_STRENGTH", DEFAULT_LORA_STRENGTH
+                ),
+                "model": ["44", 0],
+            },
+        }
+    return workflow
 
 
 def run_workflow(workflow: dict[str, Any], dest: Path, client: ComfyUIClient | None = None) -> Path:
@@ -828,6 +938,7 @@ def run_text_to_image(
     seed: int | None = None,
     client: ComfyUIClient | None = None,
     checkpoint: str | None = None,
+    lora: str | None = None,
 ) -> Path:
     """SDXL 文生图：生成一张图片并保存到 dest（尺寸缺省读环境变量）。"""
     dest = Path(dest)
@@ -838,6 +949,7 @@ def run_text_to_image(
         height=height,
         seed=seed,
         checkpoint=checkpoint,
+        lora=lora,
     )
     return run_workflow(workflow, dest, client)
 
@@ -853,6 +965,7 @@ def run_image_to_video(
     seed: int | None = None,
     client: ComfyUIClient | None = None,
     checkpoint: str | None = None,
+    lora: str | None = None,
 ) -> Path:
     """LTX-Video 图生视频：把首帧图转为视频片段并保存到 dest。
 
@@ -880,5 +993,6 @@ def run_image_to_video(
         length=length,
         seed=seed,
         checkpoint=checkpoint,
+        lora=lora,
     )
     return run_workflow(workflow, Path(dest), client)

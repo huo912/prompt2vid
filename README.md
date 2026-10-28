@@ -258,6 +258,32 @@ curl -X POST http://<pod-ip>:8081/a2a/jsonrpc \
 
 见 [.env.example](.env.example)。要点：
 
+### 多 GPU 档位配置（4060 / 4090 / 5090）
+
+项目根目录提供三份完整档位配置，**每份都自带该档位的模型清单与下载命令**：
+
+| 配置文件 | 显卡 | 模型组合 | 模型总量 |
+|----------|------|----------|----------|
+| `.env.4060` | 本地 4060（8GB） | SDXL Base + LTX 2B | 约 13.8GB |
+| `.env.4090` | 云机 4090（24GB） | RealVisXL V5 + LTX 13B fp8 + IPAdapter | 约 30.9GB |
+| `.env.5090` | 云机 5090（32GB） | 同 4090，T5 上 GPU、可上 720p | 约 30.9GB |
+
+切换方式（三选一；不指定时默认加载 `.env`，即本地 4060 档）：
+
+```bash
+# CLI 指定配置文件（值可以是路径或档位简名）
+prompt2vid --env-file .env.4090 "做一个关于秋天的治愈系短视频"
+prompt2vid --env-file 4090 --check-only          # 简名写法，体检该档位
+
+# 环境变量（prompt2vid-server / k8s / systemd 场景）
+export PROMPT2VID_ENV_FILE=.env.4090              # 指定配置文件
+export PROMPT2VID_PROFILE=4090                    # 或只给档位简名
+```
+
+预检报告第一行会显示当前生效的配置文件，可据此确认切换是否成功。
+
+### 常用变量
+
 | 变量 | 说明 |
 |------|------|
 | `PROMPT2VID_MODEL` | 默认 LLM（LiteLLM 格式，如 `openai/gpt-4o-mini`） |
@@ -265,6 +291,9 @@ curl -X POST http://<pod-ip>:8081/a2a/jsonrpc \
 | `PROMPT2VID_MODEL__SCRIPT_WRITER` | 按 agent 覆盖模型（agent 名大写、点换双下划线） |
 | `COMFYUI_URL` | ComfyUI 服务地址（本地默认 `http://127.0.0.1:8188`） |
 | `COMFYUI_T2I_CHECKPOINT` / `COMFYUI_LTX_CHECKPOINT` / `COMFYUI_T5` | ComfyUI 模型文件名（5090/24GB+ 建议 `ltxv-13b-0.9.7-distilled-fp8`；2B 档已回退兜底） |
+| `PROMPT2VID_STYLE` | 全片固定风格（预设 `anime` 动漫 / `realistic` 写实，或字面英文提示词；留空关闭）。两层硬约束：分镜 LLM 的画面描述 + 每镜文生图/图生视频正负向提示词自动追加风格词与排斥词 |
+| `COMFYUI_T2I_LORA` / `COMFYUI_T2I_LORA_STRENGTH` | 文生图风格 LoRA（`models/loras/`，默认权重 0.8）；缺失时自动降级为无 LoRA 生成。各档位推荐：4060/SDXL Base → `anime.safetensors`（ntc-ai 滑块，权重 1.5）；4090/5090 → 同款 + 视频侧 `shinkai-anime-style-lora-v1_58000.safetensors`（下载命令见 `.env.<档位>` 头部） |
+| `COMFYUI_LTX_LORA` / `COMFYUI_LTX_LORA_STRENGTH` | LTX 图生视频风格 LoRA（`LoraLoaderModelOnly` 加载，LTX checkpoint 无 CLIP）；LTX 2B 无现成动漫 LoRA 留空，13B 档推荐新海诚风格 LoRA |
 | `COMFYUI_T2I_WIDTH` / `COMFYUI_T2I_HEIGHT` | 首帧画幅（默认 768x1344 竖屏；视频画幅会跟随首帧自动换算成 32 的倍数，避免人物被裁变形） |
 | `COMFYUI_T2I_STEPS` / `COMFYUI_LTX_STEPS` / `COMFYUI_LTX_CFG` | 采样步数/cfg（SDXL 默认 25；LTX 留空按模型自动：distilled → cfg 1.0 / 8 步，13B dev → cfg 3.0 / 30 步，2B → cfg 3.0 / 10 步） |
 | `COMFYUI_LTX_MAX_PIXELS` / `COMFYUI_LTX_WIDTH` / `COMFYUI_LTX_HEIGHT` | LTX 单帧像素预算（2B 默认 512x768，13B 自动 576x1024；可设 921600 上 720p）或显式固定画幅（32 倍数） |

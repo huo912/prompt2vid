@@ -323,6 +323,76 @@ def test_resolve_checkpoint_returns_configured_when_query_fails(monkeypatch):
     assert client.resolve_checkpoint("t2i") == "sd_xl_base_1.0.safetensors"
 
 
+# ---------------------------------------------------------- LoRA 文件名校准
+
+def _lora_info_handler(loras: list[str]):
+    """Mock /object_info/LoraLoader 与 LoraLoaderModelOnly 的候选列表。"""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        node = request.url.path.rsplit("/", 1)[1]
+        if node in ("LoraLoader", "LoraLoaderModelOnly"):
+            return httpx.Response(
+                200,
+                json={
+                    node: {
+                        "input": {
+                            "required": {
+                                "lora_name": [loras, {"tooltip": "The name..."}]
+                            }
+                        }
+                    }
+                },
+            )
+        return httpx.Response(404)
+
+    return handler
+
+
+def _client_with_loras(loras: list[str]) -> ComfyUIClient:
+    return ComfyUIClient(
+        base_url="http://comfyui.test",
+        http=httpx.Client(transport=httpx.MockTransport(_lora_info_handler(loras))),
+    )
+
+
+LORAS = ["anime.safetensors", "shinkai-anime-style-lora-v1_58000.safetensors"]
+
+
+def test_resolve_lora_keeps_configured_when_available(monkeypatch):
+    monkeypatch.setenv("COMFYUI_T2I_LORA", "anime.safetensors")
+    assert _client_with_loras(LORAS).resolve_lora("t2i") == "anime.safetensors"
+
+
+def test_resolve_lora_disables_when_missing(monkeypatch):
+    """LoRA 缺失：告警并返回空串（降级为无 LoRA），不挑别的 LoRA 顶替。"""
+    monkeypatch.setenv("COMFYUI_T2I_LORA", "not-downloaded.safetensors")
+    assert _client_with_loras(LORAS).resolve_lora("t2i") == ""
+
+
+def test_resolve_ltx_lora_uses_model_only_node(monkeypatch):
+    monkeypatch.setenv("COMFYUI_LTX_LORA", "shinkai-anime-style-lora-v1_58000.safetensors")
+    client = _client_with_loras(LORAS)
+    assert client.resolve_lora("ltx") == "shinkai-anime-style-lora-v1_58000.safetensors"
+
+
+def test_resolve_lora_unset_returns_empty(monkeypatch):
+    monkeypatch.delenv("COMFYUI_T2I_LORA", raising=False)
+    monkeypatch.delenv("COMFYUI_LTX_LORA", raising=False)
+    client = _client_with_loras(LORAS)
+    assert client.resolve_lora("t2i") == ""
+    assert client.resolve_lora("ltx") == ""
+
+
+def test_resolve_lora_query_failure_keeps_config(monkeypatch):
+    """object_info 查询失败（旧版 ComfyUI）时保持原配置，与 checkpoint 一致。"""
+    monkeypatch.setenv("COMFYUI_T2I_LORA", "anime.safetensors")
+    client = ComfyUIClient(
+        base_url="http://comfyui.test",
+        http=httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(404))),
+    )
+    assert client.resolve_lora("t2i") == "anime.safetensors"
+
+
 def test_workflow_checkpoint_override():
     from prompt2vid.comfyui_client import build_i2v_workflow, build_t2i_workflow
 

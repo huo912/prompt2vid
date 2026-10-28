@@ -189,11 +189,15 @@ def _prepare_character_refs(
     characters: dict[int, Character],
     client: ComfyUIClient,
     checkpoint: str | None = None,
+    lora: str | None = None,
 ) -> dict[int, dict]:
     """为每个角色生成/复用一张定妆照并上传，返回 char_id → 参考图注入参数。
 
     已有的定妆照直接复用（断点续跑）；某个角色生成或上传失败只警告，
     对应分镜回退为无参考生成——参考注入是锦上添花，不能阻塞出图。
+
+    checkpoint / lora 与分镜首帧生成保持一致：定妆照走同一条模型链
+    （含风格约束与 LoRA），IPAdapter 注入的参考才不会和成片风格打架。
     """
     refs: dict[int, dict] = {}
     for cid, character in sorted(characters.items()):
@@ -207,6 +211,7 @@ def _prepare_character_refs(
                     height=1024,
                     client=client,
                     checkpoint=checkpoint,
+                    lora=lora,
                 )
                 logger.info("frames: 角色 %s 定妆照已生成: %s",
                             character.name or cid, dest.name)
@@ -271,10 +276,12 @@ def generate_frames(workspace: str | Path | None = None) -> dict:
             # 配置的 checkpoint 名在云机上可能不存在（如只下了 RealVisXL）：
             # 开局按 ComfyUI 实际模型列表校准一次，避免每镜都 HTTP 400 全失败
             t2i_checkpoint = client.resolve_checkpoint("t2i")
+            # LoRA 同理校准（缺失时降级为无 LoRA，流水线不中断）
+            t2i_lora = client.resolve_lora("t2i")
             refs: dict[int, dict] = {}
             if characters:
                 refs = _prepare_character_refs(
-                    ws, characters, client, checkpoint=t2i_checkpoint
+                    ws, characters, client, checkpoint=t2i_checkpoint, lora=t2i_lora
                 )
                 if not refs:
                     logger.warning("frames: 没有可用的角色参考图，全部按无参考生成")
@@ -289,6 +296,7 @@ def generate_frames(workspace: str | Path | None = None) -> dict:
                     prompt=shot.image_prompt,
                     reference=reference,
                     checkpoint=t2i_checkpoint,
+                    lora=t2i_lora,
                 )
 
             for attempt in range(_retries() + 1):
@@ -375,8 +383,9 @@ def generate_clips(workspace: str | Path | None = None) -> dict:
 
     if pending:
         with ComfyUIClient() as client:
-            # 同上：按服务端实际模型列表校准 LTX checkpoint 文件名
+            # 同上：按服务端实际模型列表校准 LTX checkpoint 文件名与 LoRA
             ltx_checkpoint = client.resolve_checkpoint("ltx")
+            ltx_lora = client.resolve_lora("ltx")
             for attempt in range(_retries() + 1):
                 if not pending:
                     break
@@ -400,6 +409,7 @@ def generate_clips(workspace: str | Path | None = None) -> dict:
                         height=height,
                         length=length,
                         checkpoint=ltx_checkpoint,
+                        lora=ltx_lora,
                     )
 
                 batch_ok, batch_errors, pending = _batch_run(

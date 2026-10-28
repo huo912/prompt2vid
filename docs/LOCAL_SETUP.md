@@ -58,7 +58,11 @@ LTXV 节点是否齐备，并对每个 NG 项给出修复提示。本文就是�
 说明：
 
 - **不需要单独下载 VAE**：LTX 的 VAE 内置于其 checkpoint；SDXL 的 VAE 内置于
-  base 模型。也不需要 refiner、LoRA、上采样器。
+  base 模型。也不需要 refiner、上采样器。
+- **动漫风格 LoRA（可选，48MB）**：`ntc-ai/SDXL-LoRA-slider.anime` 的
+  `anime.safetensors` 放 `models/loras/`，配合 `.env` 的
+  `PROMPT2VID_STYLE=anime` + `COMFYUI_T2I_LORA=anime.safetensors` 使用；
+  文件不下载也不报错（自动降级为纯提示词风格约束）。
 - **SDXL 与 LTX 是两个独立 checkpoint**，都放 `models/checkpoints/`，ComfyUI
   按工作流里的 `ckpt_name` 精确匹配文件名加载。
 - **T5 属于文本编码器目录**（`models/text_encoders/`），不是 checkpoints。
@@ -75,6 +79,8 @@ D:\ComfyUI_windows_portable\
         ├── checkpoints\
         │   ├── sd_xl_base_1.0.safetensors        (~6.9GB)
         │   └── ltx-video-2b-v0.9.5.safetensors   (~2.0GB)
+        ├── loras\                                 (可选，动漫风格)
+        │   └── anime.safetensors                  (~48MB)
         └── text_encoders\
             └── t5xxl_fp8_e4m3fn.safetensors      (~4.9GB)
 ```
@@ -120,6 +126,11 @@ huggingface-cli download Lightricks/LTX-Video `
 huggingface-cli download comfyanonymous/flux_text_encoders `
   t5xxl_fp8_e4m3fn.safetensors `
   --local-dir "D:\ComfyUI_windows_portable\ComfyUI\models\text_encoders"
+
+# 4.（可选）动漫风格 LoRA → models/loras/
+huggingface-cli download ntc-ai/SDXL-LoRA-slider.anime `
+  anime.safetensors `
+  --local-dir "D:\ComfyUI_windows_portable\ComfyUI\models\loras"
 ```
 
 > 新版工具的等价命令是 `hf download <仓库> <文件> --local-dir <目录>`，
@@ -236,6 +247,9 @@ Get-ChildItem "D:\ComfyUI_windows_portable\ComfyUI\models\checkpoints", `
 | `COMFYUI_LTX_CHECKPOINT` | `ltx-video-2b-v0.9.5.safetensors` | 同上 |
 | `COMFYUI_T5` | `t5xxl_fp8_e4m3fn.safetensors` | 同上 |
 | `COMFYUI_T5_DEVICE` | `cpu` | 8GB 显存必配（默认已是），T5 走内存 |
+| `PROMPT2VID_STYLE` | `anime` | 全片固定风格（动漫）。分镜提示词 + 每镜正负向提示词两层自动追加风格词；留空关闭，改为 `realistic` 可切写实 |
+| `COMFYUI_T2I_LORA` / `COMFYUI_T2I_LORA_STRENGTH` | `anime.safetensors` / `1.5` | 文生图动漫 LoRA（§3.3 第 4 步下载，48MB）；滑块类 LoRA 权重建议 1.0-2.0；文件缺失自动降级为不挂 |
+| `COMFYUI_LTX_LORA` | （空） | 视频侧 LoRA：LTX 2B 无现成动漫 LoRA，留空即可（视频风格由动漫首帧传递）；13B 档推荐见 docs/deploy.md §7 |
 | `COMFYUI_RETRIES` | `2` | 单镜生成失败自动重试次数 |
 | `COMFYUI_LTX_FPS` / `COMFYUI_LTX_MAX_FRAMES` | `25` / `121` | 帧率与单镜帧数上限（8n+1 自动保证） |
 | `PROMPT2VID_MODEL` | 如 `openai/qwen3.8-27b` | **注意加 LiteLLM 提供商前缀**（自建 OpenAI 兼容网关用 `openai/` 前缀），否则 LiteLLM 可能无法路由 |

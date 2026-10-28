@@ -25,10 +25,16 @@
 | 3 | `t5xxl_fp8_e4m3fn.safetensors` | ~4.9GB | `models/text_encoders/` | 视频阶段的文字编码器（必须 fp8 版，fp16 版会 OOM） | `COMFYUI_T5` |
 | 4（可选） | `ip-adapter-plus-face_sdxl_vit-h.safetensors` | ~0.5GB | `models/ipadapter/` | 角色一致性：参考注入适配器 | 无需配置（节点按预设名自动加载） |
 | 5（可选） | `CLIP-ViT-H-14-laion2B-s32B-b79K.safetensors` | ~2.5GB | `models/clip_vision/` | 角色一致性：参考图的图像编码器 | 无需配置 |
+| 6（可选） | `anime.safetensors` | ~48MB | `models/loras/` | 全片动漫风格（文生图 LoRA，各档位推荐见 §七与 `.env.<档位>`） | `COMFYUI_T2I_LORA` |
 
-前 3 个必装（约 13.8GB）；4、5 只在想开启角色一致性时才装（约 3GB）。
+前 3 个必装（约 13.8GB）；4、5 只在想开启角色一致性时才装（约 3GB）；
+6 只在固定动漫风格时才装（48MB，文件缺失会自动降级为纯提示词风格约束）。
 下载命令（hf-mirror 镜像，PowerShell）见 [LOCAL_SETUP.md](LOCAL_SETUP.md)
 §3.3 与 §6.2，可直接复制。
+
+> 风格固定不依赖任何文件：`.env` 里 `PROMPT2VID_STYLE=anime` 即可让分镜
+> 提示词与画面描述全部按动漫风格生成；LoRA（文件 #6）是在此基础上再叠
+> 一层模型级风格拉力，两者可独立使用。
 
 ## 二、工作流① 文生图——节点与模型对照
 
@@ -37,7 +43,8 @@
 | 节点 | 作用 | 需要你配置什么 |
 |---|---|---|
 | CheckpointLoaderSimple | 加载 SDXL 主模型 | **文件 #1** 放对位置即可 |
-| CLIPTextEncode（正/负） | 提示词 → 文本向量 | 无（用 SDXL 自带的 CLIP） |
+| LoraLoader（配置了 LoRA 时出现） | 叠加风格 LoRA（权重读 `COMFYUI_T2I_LORA_STRENGTH`） | **文件 #6** 放对位置即可（缺失自动降级为不挂） |
+| CLIPTextEncode（正/负） | 提示词 → 文本向量（风格词由 `PROMPT2VID_STYLE` 自动追加） | 无（用 SDXL 自带的 CLIP） |
 | EmptyLatentImage | 768×1344 竖屏空白画布 | 无 |
 | KSampler | 采样出图（25 步，代码传参） | 无 |
 | VAEDecode → SaveImage | 解码、保存 PNG | 无 |
@@ -52,8 +59,9 @@
 | 节点 | 作用 | 需要你配置什么 |
 |---|---|---|
 | CheckpointLoaderSimple | 加载 LTX-Video 主模型（自带 VAE，无需单独下载） | **文件 #2** |
+| LoraLoaderModelOnly（配置 `COMFYUI_LTX_LORA` 时出现） | 视频侧风格 LoRA（只接 MODEL，LTX 无 CLIP） | 13B 档推荐新海诚 LoRA（见 §7.2），2B 档留空 |
 | CLIPLoader | 加载 T5 文本编码器（`type=ltxv`、`device=cpu` 由代码传，省显存） | **文件 #3** |
-| CLIPTextEncode（正/负） | 运动/画面提示词编码 | 无 |
+| CLIPTextEncode（正/负） | 运动/画面提示词编码（风格词由 `PROMPT2VID_STYLE` 自动追加） | 无 |
 | LoadImage → LTXVPreprocess | 载入首帧图 | 无（自动上传） |
 | LTXVImgToVideo / LTXVConditioning / LTXVScheduler / KSamplerSelect / SamplerCustom | LTX 采样管线（帧数、步数全由代码传参） | 无，但**要求 ComfyUI 是 2024-11 之后的版本**（自带这些 LTXV 节点） |
 | VAEDecode → SaveWEBM | 输出 webm 片段 | 无 |
@@ -93,13 +101,23 @@ git clone https://github.com/cubiq/ComfyUI_IPAdapter_plus.git
 | 预检 NG「T5 文本编码器」 | 文件 #3 没放 `models/text_encoders/`，或下了 fp16 版（文件名不同） |
 | 预检 NG「LTXV 节点」 | ComfyUI 版本太旧，升级 |
 | 预检 NG「ComfyUI 可达」 | ComfyUI 没启动，或端口/`COMFYUI_URL` 不对 |
+| 预检 NG「T2I/LTX LoRA」（不拦截运行） | LoRA 没放 `models/loras/` 或文件名不一致；运行时会自动降级为无 LoRA，只靠提示词风格约束 |
+| clips 阶段整批失败且挂了 LTX LoRA | LoRA 与 LTX 底模版本不匹配（如在 distilled fp8 上用了 dev 版 LoRA）：清空 `COMFYUI_LTX_LORA` 或换底模 |
 | run.log 出现「角色 … 定妆照生成/上传失败…回退」 | IPAdapter 节点或模型 #4/#5 未就位（不影响出片，只是没有参考） |
 
-## 七、5090 高质量档：模型下载清单（第 2 档升级）
+## 七、5090 / 4090 高质量档：模型下载清单（第 2 档升级）
 
-> 适用：租用 5090（32GB）跑高质量 1 分钟视频。本文第 1-6 节的标准档模型
-> （SDXL Base + LTX 2B + T5）继续保留，旧文件不删——`.env` 一行即可在
-> 快速档/高质量档之间来回切换。所有文件名均已对照 hf-mirror 仓库逐一核实。
+> 适用：租用 5090（32GB）或 4090（24GB）跑高质量 1 分钟视频。两档用同一套
+> 模型（约 31.8GB），差别只在显存余量：5090 可把 T5 挪上 GPU、显存富余时
+> 上 720p（`COMFYUI_LTX_MAX_PIXELS=921600`），4090 建议 T5 留 CPU、
+> 像素预算保持 576x1024。本文第 1-6 节的标准档模型（SDXL Base + LTX 2B + T5）
+> 继续保留，旧文件不删。所有文件名均已对照 hf-mirror 仓库逐一核实。
+>
+> 档位切换：项目根目录已提供三份完整配置 `.env.4060` / `.env.4090` /
+> `.env.5090`（各含本节对应的模型清单与下载命令）。运行时用
+> `prompt2vid --env-file .env.5090 "描述"`（或简名 `--env-file 5090`）切换，
+> 不指定时默认 `.env`（本地 4060 档）；server/k8s 场景用环境变量
+> `PROMPT2VID_ENV_FILE=.env.5090` 或 `PROMPT2VID_PROFILE=5090`。
 
 ### 7.1 准备（一次性，云机 shell）
 
@@ -107,10 +125,10 @@ git clone https://github.com/cubiq/ComfyUI_IPAdapter_plus.git
 pip install -U "huggingface_hub[cli]"
 export HF_ENDPOINT=https://hf-mirror.com          # 国内镜像
 MODELS=/root/autodl-tmp/ComfyUI/models            # ← 改成你的 ComfyUI models 实际路径
-mkdir -p "$MODELS"/{checkpoints,text_encoders,ipadapter,clip_vision}
+mkdir -p "$MODELS"/{checkpoints,text_encoders,ipadapter,clip_vision,loras}
 ```
 
-### 7.2 模型清单（5 个文件，新增约 26GB）
+### 7.2 模型清单（7 个文件，新增约 26.9GB）
 
 | # | 用途 | 文件（已核实） | 大小 |
 |---|---|---|---|
@@ -119,6 +137,8 @@ mkdir -p "$MODELS"/{checkpoints,text_encoders,ipadapter,clip_vision}
 | ③ | 角色一致性 adapter | `ip-adapter-plus-face_sdxl_vit-h.safetensors` | 848MB |
 | ④ | 角色一致性编码器 | `model.safetensors`（**下载后必须重命名**） | 2.53GB |
 | ⑤ | 视频文本编码 | `t5xxl_fp8_e4m3fn.safetensors`（标准档已有则跳过） | 4.9GB |
+| ⑥ | 文生图动漫风格 LoRA | `anime.safetensors` | 48MB |
+| ⑦ | 视频动漫风格 LoRA（13B） | `shinkai-anime-style-lora-v1_58000.safetensors` | 812MB |
 
 ### 7.3 下载命令
 
@@ -153,40 +173,59 @@ rm -rf /tmp/p2v-dl
 huggingface-cli download comfyanonymous/flux_text_encoders \
   t5xxl_fp8_e4m3fn.safetensors \
   --local-dir "$MODELS/text_encoders"
+
+# ⑥ 文生图动漫风格 LoRA（SDXL 概念滑块，写实系底模上把画面拉向动漫）
+huggingface-cli download ntc-ai/SDXL-LoRA-slider.anime \
+  anime.safetensors \
+  --local-dir "$MODELS/loras"
+
+# ⑦ 视频动漫风格 LoRA（LTX-Video 13B，新海诚风格；触发词 sh1nka1 style）
+huggingface-cli download Cseti/ltxv-13b-shinkai-anime-style-lora-v1 \
+  shinkai-anime-style-lora-v1_58000.safetensors \
+  --local-dir "$MODELS/loras"
 ```
 
 ### 7.4 下载后验证
 
 ```bash
-ls -lh "$MODELS"/checkpoints/ "$MODELS"/ipadapter/ "$MODELS"/clip_vision/ "$MODELS"/text_encoders/
+ls -lh "$MODELS"/checkpoints/ "$MODELS"/ipadapter/ "$MODELS"/clip_vision/ "$MODELS"/text_encoders/ "$MODELS"/loras/
 # 预期看到：
 #   checkpoints/RealVisXL_V5.0_fp16.safetensors            6.9G
 #   checkpoints/ltxv-13b-0.9.7-distilled-fp8.safetensors    16G
 #   ipadapter/ip-adapter-plus-face_sdxl_vit-h.safetensors  848M
 #   clip_vision/CLIP-ViT-H-14-laion2B-s32B-b79K.safetensors 2.5G
 #   text_encoders/t5xxl_fp8_e4m3fn.safetensors             4.9G
+#   loras/anime.safetensors                                 48M
+#   loras/shinkai-anime-style-lora-v1_58000.safetensors    812M
 ```
 
-### 7.5 启用（项目 `.env` 三行 + 体检）
+### 7.5 启用（档位配置文件 + 体检）
+
+高质量档配置已写好在 `.env.5090` / `.env.4090`（本节所有参数），关键项：
 
 ```ini
 COMFYUI_T2I_CHECKPOINT=RealVisXL_V5.0_fp16.safetensors
 COMFYUI_LTX_CHECKPOINT=ltxv-13b-0.9.7-distilled-fp8.safetensors
 COMFYUI_IPADAPTER=true
+# 全片固定为动漫风格（提示词层约束，不需要任何模型文件）
+PROMPT2VID_STYLE=anime
+# 文生图 / 视频侧动漫 LoRA（模型清单 ⑥⑦；缺失自动降级为不挂）
+COMFYUI_T2I_LORA=anime.safetensors
+COMFYUI_T2I_LORA_STRENGTH=1.5
+COMFYUI_LTX_LORA=shinkai-anime-style-lora-v1_58000.safetensors
 # 首帧画幅（视频画幅会跟随首帧自动换算，不要固定 512x768）
 COMFYUI_T2I_WIDTH=768
 COMFYUI_T2I_HEIGHT=1344
-# 13B 单帧像素预算：576x1024；想上 720p 可改 921600（约 704x1248）
+# 13B 单帧像素预算：576x1024；5090 显存富余想上 720p 可改 921600（约 704x1248）
 COMFYUI_LTX_MAX_PIXELS=589824
 ```
 
 ```bash
-prompt2vid --check-only     # 本地执行，会真实连云机验证模型就位
+prompt2vid --check-only --env-file 5090   # 本地执行，会真实连云机验证模型就位
 ```
 
-切回快速档：把 checkpoint 三行改回 `sd_xl_base_1.0.safetensors` /
-`ltx-video-2b-v0.9.5.safetensors` / 注释掉 IPADAPTER 即可，同时把
-`COMFYUI_LTX_MAX_PIXELS` 改回 `393216` 或直接删掉（会按 2B 自动选择）。
+切回快速档（本地 4060）：`--env-file 4060`（或不带 `--env-file`，默认 `.env`）。
+两档模型文件互不影响，可以共存（数据盘约 45GB 时注意剩余空间）。
 
 ### 7.6 备注
 

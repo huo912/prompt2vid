@@ -133,6 +133,10 @@ class FakeComfyUIClient:
         # 真实客户端会查 /object_info 校准文件名；mock 固定返回可预测值
         return f"mock-{role}.safetensors"
 
+    def resolve_lora(self, role: str = "t2i") -> str:
+        # 真实客户端会查 /object_info；mock 默认不挂 LoRA（空串 = 关闭）
+        return ""
+
     def close(self) -> None:
         pass
 
@@ -317,6 +321,51 @@ def test_generate_frames_degrades_reference_on_retry(tmp_path, monkeypatch):
     assert shot1_first["ref_apply"]["class_type"] == "IPAdapter"
     # 重试轮降级：镜 1 不再携带参考节点
     assert not any(key.startswith("ref_") for key in shot1_retry)
+
+
+def test_generate_frames_applies_style_and_lora(tmp_path, monkeypatch):
+    """风格约束 + LoRA：每个提交的工作流都带风格词与 LoRA 节点。"""
+    _setup_workspace(tmp_path, monkeypatch)
+    monkeypatch.setenv("PROMPT2VID_STYLE", "anime")
+    monkeypatch.setenv("COMFYUI_T2I_LORA", "anime.safetensors")
+    fake = _use_fake_client(monkeypatch)
+    fake.resolve_lora = lambda role="t2i": "anime.safetensors"
+
+    summary = stages.generate_frames()
+
+    assert summary["succeeded"] == 2
+    assert len(fake.submitted) == 2
+    for wf, original in zip(fake.submitted, ("autumn park, golden leaves", "falling leaves")):
+        text = wf["6"]["inputs"]["text"]
+        assert original in text  # 原始画面描述保留
+        assert "anime style" in text  # 风格正向词已追加
+        assert "photorealistic" in wf["7"]["inputs"]["text"]  # 负向排斥词
+        assert wf["lora"]["class_type"] == "LoraLoader"
+        assert wf["lora"]["inputs"]["lora_name"] == "anime.safetensors"
+        # 文本编码与采样器都接在 LoRA 之后
+        assert wf["6"]["inputs"]["clip"] == ["lora", 1]
+        assert wf["3"]["inputs"]["model"] == ["lora", 0]
+
+
+def test_generate_clips_applies_lora_model_only(tmp_path, monkeypatch):
+    """视频侧 LoRA 用 LoraLoaderModelOnly（LTX checkpoint 无 CLIP 可接）。"""
+    _setup_workspace(tmp_path, monkeypatch)
+    _use_fake_client(monkeypatch)
+    stages.generate_frames()  # 先产出首帧清单
+
+    fake = _use_fake_client(monkeypatch)
+    fake.resolve_lora = lambda role="t2i": (
+        "shinkai-anime-style-lora-v1_58000.safetensors"
+    )
+    monkeypatch.delenv("PROMPT2VID_STYLE", raising=False)
+
+    summary = stages.generate_clips()
+
+    assert summary["succeeded"] == 2
+    for wf in fake.submitted:
+        assert wf["lora"]["class_type"] == "LoraLoaderModelOnly"
+        assert wf["72"]["inputs"]["model"] == ["lora", 0]
+        assert wf["lora"]["inputs"]["model"] == ["44", 0]
 
 
 def test_generate_clips_batch_from_frames_manifest(tmp_path, monkeypatch):

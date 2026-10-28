@@ -103,6 +103,29 @@ def test_analyze_requirement_task_carries_user_prompt():
     assert "{user_prompt}" in spec["description"]
 
 
+def test_style_hint_injected_into_storyboard_task(monkeypatch):
+    """PROMPT2VID_STYLE=anime：分镜任务注入风格约束，其它任务不受影响。"""
+    os.environ.setdefault("PROMPT2VID_CONFIG_DIR", str(REPO_ROOT / "config"))
+    os.environ.setdefault("PROMPT2VID_LLM_API_KEY", "sk-test-dummy")
+    monkeypatch.setenv("PROMPT2VID_STYLE", "anime")
+
+    from prompt2vid.crew import TASK_ORDER, build_agents, build_tasks
+
+    agents = build_agents(REPO_ROOT / "config")
+    tasks = build_tasks(REPO_ROOT / "config", agents)
+    by_name = dict(zip(TASK_ORDER, tasks))
+
+    assert "PROMPT2VID_STYLE=anime" in by_name["plan_storyboard"].description
+    assert "anime style" in by_name["plan_storyboard"].description
+    for name in ("analyze_requirement", "write_script", "generate_images"):
+        assert "PROMPT2VID_STYLE" not in by_name[name].description
+
+    # 关闭风格后不注入（提示词层约束同样关闭）
+    monkeypatch.delenv("PROMPT2VID_STYLE", raising=False)
+    tasks = build_tasks(REPO_ROOT / "config", build_agents(REPO_ROOT / "config"))
+    assert "PROMPT2VID_STYLE" not in dict(zip(TASK_ORDER, tasks))["plan_storyboard"].description
+
+
 def test_kickoff_inputs_interpolate_into_first_task():
     """模拟 kickoff 插值：用户描述应真实出现在第一个任务的描述里。"""
     os.environ.setdefault("PROMPT2VID_CONFIG_DIR", str(REPO_ROOT / "config"))
