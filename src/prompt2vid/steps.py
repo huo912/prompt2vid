@@ -1,9 +1,9 @@
-"""分步执行：9 步注册表 + 单步执行器 + steps.json 状态落盘。
+"""分步执行：10 步注册表 + 单步执行器 + steps.json 状态落盘。
 
 调试用：不必整条流水线跑到底，可以执行/重跑任意单个 agent 步骤。
 - 创意步骤（需求/剧本/分镜）与发布步骤：单任务 crew（LLM）执行；
-- 媒体步骤（生图/生视频/配音/渲染/质检）：直接调用 stages.py 的
-  确定性函数——与该步骤 agent 转调的工具是同一实现，省一次 LLM
+- 媒体步骤（生图/生视频/配音/口型同步/渲染/质检）：直接调用 stages.py
+  的确定性函数——与该步骤 agent 转调的工具是同一实现，省一次 LLM
   往返（与直接媒体模式同一思路）。
 
 执行状态写入 <run_dir>/steps.json（status/起止时间/摘要/错误），
@@ -29,6 +29,7 @@ from .stages import (
     CLIPS_DIR,
     FINAL_DIR,
     FRAMES_DIR,
+    LIPSYNC_DIR,
     REPORT_DIR,
 )
 from .workspace import set_workspace
@@ -43,11 +44,13 @@ STAGE_OUTPUT_DIRS: dict[str, str] = {
     "frames": FRAMES_DIR,
     "clips": CLIPS_DIR,
     "voiceovers": AUDIO_DIR,
+    "lipsync": LIPSYNC_DIR,
     "render": FINAL_DIR,
     "quality": REPORT_DIR,
 }
 
-# 9 步注册表（顺序 = crew.TASK_ORDER；id 即 task 名）
+# 10 步注册表（顺序 = 流水线执行序；创意/发布步骤的 id 即 crew 任务名，
+# sync_lips 无对应 crew 任务——媒体步骤本就直跑 stages，不耗 LLM）
 STEPS: list[dict[str, Any]] = [
     {
         "id": "analyze_requirement",
@@ -107,7 +110,17 @@ STEPS: list[dict[str, Any]] = [
         "stage": "voiceovers",
         "artifact": f"{AUDIO_DIR}/manifest.json",
         "requires": ["storyboard.json"],
-        "description": "逐镜中文配音 → audio/（直跑 stages，不耗 LLM）",
+        "description": "逐镜中文配音（IndexTTS-2.5/edge-tts 回退链）→ audio/（直跑 stages，不耗 LLM）",
+    },
+    {
+        "id": "sync_lips",
+        "label": "口型同步",
+        "agent": "video_editor",
+        "kind": "media",
+        "stage": "lipsync",
+        "artifact": f"{LIPSYNC_DIR}/manifest.json",
+        "requires": [f"{CLIPS_DIR}/manifest.json", f"{AUDIO_DIR}/manifest.json"],
+        "description": "配音驱动唇形（LatentSync）→ lipsync/（直跑 stages，不耗 LLM；缺节点自动跳过）",
     },
     {
         "id": "edit_video",

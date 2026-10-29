@@ -3,9 +3,9 @@
 两种执行模式：
 - crew 模式（默认）：9 个 LLM agent 顺序执行全流程（A2A/kagent 形态）；
 - 直接媒体模式（PROMPT2VID_DIRECT_MEDIA=1 或 CLI --direct-media）：
-  只用 LLM 做创意三阶段（需求→剧本→分镜），生图/生视频/配音/渲染/质检
-  由 stages.py 确定性代码直接执行，发布再由一次 LLM 调用完成——省去 6 次
-  LLM 往返（更快、更省 token、更少故障面）。
+  只用 LLM 做创意三阶段（需求→剧本→分镜），生图/生视频/配音/口型
+  同步/渲染/质检由 stages.py 确定性代码直接执行，发布再由一次 LLM
+  调用完成——省去 6 次 LLM 往返（更快、更省 token、更少故障面）。
 
 统一日志：每次运行的日志写入 <工作目录>/run.log（阶段开始/结束、
 耗时、失败原因），排障不再只依赖 stdout。
@@ -30,11 +30,12 @@ CREATIVE_TASKS = ["analyze_requirement", "write_script", "plan_storyboard"]
 PUBLISH_TASK = "publish_douyin"
 
 # 媒体阶段（顺序）
-MEDIA_STAGES = ["frames", "clips", "voiceovers", "render", "quality"]
+MEDIA_STAGES = ["frames", "clips", "voiceovers", "lipsync", "render", "quality"]
 _STAGE_FUNCS: dict[str, Any] = {
     "frames": stages.generate_frames,
     "clips": stages.generate_clips,
     "voiceovers": stages.generate_voiceovers,
+    "lipsync": stages.sync_lips,
     "render": stages.render_final,
     "quality": stages.run_quality_checks,
 }

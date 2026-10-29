@@ -78,6 +78,7 @@ class FakeComfyUIClient:
 
     fail_first_n：前 n 个提交失败（含 wait/wait_all）。
     fail_indices：指定序号集合失败（用于"定妆照成功、分镜失败"等场景）。
+    missing_nodes：node_exists 返回 False 的节点集合（口型同步 gating 用）。
     """
 
     def __init__(
@@ -85,12 +86,14 @@ class FakeComfyUIClient:
         fail_first_n: int = 0,
         fail_all: bool = False,
         fail_indices: set[int] | None = None,
+        missing_nodes: set[str] | None = None,
     ):
         self.submitted: list[dict] = []
         self.uploads: list[Path] = []
         self._fail_first_n = fail_first_n
         self._fail_all = fail_all
         self._fail_indices = fail_indices or set()
+        self._missing_nodes = missing_nodes or set()
 
     def _fails(self, idx: int) -> bool:
         return self._fail_all or idx in self._fail_indices or idx < self._fail_first_n
@@ -129,6 +132,17 @@ class FakeComfyUIClient:
         self.uploads.append(Path(image_path))
         return Path(image_path).name
 
+    def upload_file(self, file_path, name=None) -> str:
+        self.uploads.append(Path(file_path))
+        return Path(file_path).name
+
+    def node_exists(self, node: str) -> bool:
+        return node not in self._missing_nodes
+
+    def filter_workflow_inputs(self, workflow):
+        # 真实客户端会按服务端 object_info 过滤未声明输入；mock 原样返回
+        return workflow
+
     def resolve_checkpoint(self, role: str = "t2i") -> str:
         # 真实客户端会查 /object_info 校准文件名；mock 固定返回可预测值
         return f"mock-{role}.safetensors"
@@ -149,6 +163,12 @@ class FakeComfyUIClient:
 
 def _setup_workspace(tmp_path: Path, monkeypatch, storyboard: dict | None = None) -> Path:
     monkeypatch.setenv("PROMPT2VID_WORKSPACE", str(tmp_path))
+    # 渲染类测试固定基线：仓库 .env（含 PROMPT2VID_UPSCALE 等）可能被
+    # 其它测试经 load_env 写进 os.environ，这里统一清掉保证断言稳定
+    for name in ("PROMPT2VID_UPSCALE", "PROMPT2VID_UPSCALE_SHARPEN",
+                 "PROMPT2VID_SMOOTH_FPS", "PROMPT2VID_VIDEO_CRF",
+                 "PROMPT2VID_CLIP_CRF"):
+        monkeypatch.delenv(name, raising=False)
     (tmp_path / "storyboard.json").write_text(
         json.dumps(storyboard or STORYBOARD, ensure_ascii=False), encoding="utf-8"
     )
@@ -169,6 +189,14 @@ def test_frames_for_duration_respects_ltx_constraints():
         assert length >= stages.MIN_FRAMES
     # 上限
     assert stages.frames_for_duration(60) <= 121
+
+
+def test_frames_for_duration_follows_ltx_fps_env(monkeypatch):
+    """COMFYUI_LTX_FPS 参与帧数换算（工作流的 frame_rate 同源）。"""
+    monkeypatch.delenv("COMFYUI_LTX_FPS", raising=False)
+    assert stages.frames_for_duration(2) == 57  # 2s x 25fps → 8n+1
+    monkeypatch.setenv("COMFYUI_LTX_FPS", "50")
+    assert stages.frames_for_duration(2) == 105  # 2s x 50fps → 8n+1
 
 
 def test_generate_frames_batch_writes_manifest(tmp_path, monkeypatch):
@@ -451,6 +479,195 @@ def test_generate_voiceovers_writes_manifest(tmp_path, monkeypatch):
     assert Path(manifest["shots"][1]["path"]).is_file()
 
 
+# ------------------------------------------------------------ 口型同步
+
+
+def _lipsync_workspace(tmp_path: Path, monkeypatch, with_audio: bool = True) -> Path:
+    """clips/ + audio/（可选）齐备的工作目录，供 sync_lips 使用。"""
+    ws = _setup_workspace(tmp_path, monkeypatch)
+    monkeypatch.delenv("PROMPT2VID_LIPSYNC", raising=False)
+    clip_entries = []
+    for shot_id in (1, 2):
+        clip = ws / "clips" / f"shot_{shot_id}.webm"
+        clip.parent.mkdir(parents=True, exist_ok=True)
+        clip.write_bytes(b"fake-clip")
+        clip_entries.append({
+            "id": shot_id, "video": f"clips/shot_{shot_id}.webm",
+            "status": "ok", "path": str(clip),
+        })
+    (ws / "clips" / "manifest.json").write_text(
+        json.dumps({"shots": clip_entries}, ensure_ascii=False), encoding="utf-8"
+    )
+    if with_audio:
+        audio_entries = []
+        for shot_id in (1, 2):
+            audio = ws / "audio" / f"shot_{shot_id}.mp3"
+            audio.parent.mkdir(parents=True, exist_ok=True)
+            audio.write_bytes(b"fake-audio")
+            audio_entries.append({
+                "id": shot_id, "audio": f"audio/shot_{shot_id}.mp3",
+                "status": "ok", "path": str(audio),
+            })
+        (ws / "audio" / "manifest.json").write_text(
+            json.dumps({"shots": audio_entries}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+    return ws
+
+
+def _fake_durations(monkeypatch, clip_seconds: float, audio_seconds: float):
+    """控制 _audio_drives 的时长探测（音视频按扩展名区分）。"""
+    def fake_probe(path):
+        path = Path(path)
+        seconds = audio_seconds if path.suffix == ".mp3" else clip_seconds
+        return {"path": str(path), "duration_seconds": seconds,
+                "width": 512, "height": 768, "fps": 25.0, "has_audio": True}
+
+    monkeypatch.setattr(stages.ffmpeg_ops, "probe_file", fake_probe)
+
+
+def test_sync_lips_submits_latentsync_workflows(tmp_path, monkeypatch):
+    ws = _lipsync_workspace(tmp_path, monkeypatch)
+    fake = _use_fake_client(monkeypatch)
+    # 配音 5s > 片段 2s → pingpong（补帧到配音长度，旁白零截断）
+    _fake_durations(monkeypatch, clip_seconds=2.0, audio_seconds=5.0)
+
+    result = stages.sync_lips()
+
+    assert result["stage"] == "lipsync"
+    assert result["succeeded"] == 2
+    assert result["failed"] == 0
+    assert "error" not in result
+    assert len(fake.submitted) == 2
+    for workflow in fake.submitted:
+        assert workflow["latentsync"]["class_type"] == "LatentSyncNode"
+        assert workflow["adjust"]["inputs"]["mode"] == "pingpong"
+        assert workflow["save"]["class_type"] == "VHS_VideoCombine"
+    # 片段与配音都上传；产物落盘并写清单
+    assert {p.name for p in fake.uploads} == {
+        "shot_1.webm", "shot_2.webm", "shot_1.mp3", "shot_2.mp3",
+    }
+    for shot_id in (1, 2):
+        assert (ws / "lipsync" / f"shot_{shot_id}.mp4").is_file()
+    manifest = json.loads((ws / "lipsync" / "manifest.json").read_text(encoding="utf-8"))
+    assert [s["id"] for s in manifest["shots"]] == [1, 2]
+    assert all(s["status"] == "ok" for s in manifest["shots"])
+
+
+def test_sync_lips_normal_mode_when_clip_longer(tmp_path, monkeypatch):
+    """片段比配音长 → normal（裁帧 + 音频尾部补静音）。"""
+    _lipsync_workspace(tmp_path, monkeypatch)
+    fake = _use_fake_client(monkeypatch)
+    _fake_durations(monkeypatch, clip_seconds=5.0, audio_seconds=2.0)
+
+    stages.sync_lips()
+
+    for workflow in fake.submitted:
+        assert workflow["adjust"]["inputs"]["mode"] == "normal"
+
+
+def test_sync_lips_probe_failure_defaults_to_pingpong(tmp_path, monkeypatch):
+    """探测失败按 pingpong 处理：音频只会被静音补齐、绝不被裁剪。"""
+    _lipsync_workspace(tmp_path, monkeypatch)
+    fake = _use_fake_client(monkeypatch)
+
+    def failing_probe(path):
+        raise RuntimeError("probe failed")
+
+    monkeypatch.setattr(stages.ffmpeg_ops, "probe_file", failing_probe)
+    stages.sync_lips()
+
+    for workflow in fake.submitted:
+        assert workflow["adjust"]["inputs"]["mode"] == "pingpong"
+
+
+def test_sync_lips_failed_shot_keeps_original(tmp_path, monkeypatch):
+    """单镜失败（无人脸/OOM）保留原片段，不阻塞其余镜头。"""
+    ws = _lipsync_workspace(tmp_path, monkeypatch)
+    _fake_durations(monkeypatch, clip_seconds=2.0, audio_seconds=5.0)
+    _use_fake_client(monkeypatch, fail_indices={0})  # 镜 1 失败
+
+    result = stages.sync_lips()
+
+    assert result["succeeded"] == 1
+    assert result["failed"] == 1
+    assert result["failed_shots"][0]["id"] == 1
+    assert result["failed_shots"][0]["fallback"] == "clips/shot_1.webm"
+    # 阶段不因单镜失败而报错（渲染会回退原片段）
+    assert "error" not in result
+    assert not (ws / "lipsync" / "shot_1.mp4").exists()
+    assert (ws / "lipsync" / "shot_2.mp4").is_file()
+
+
+def test_sync_lips_missing_nodes_auto_skips(tmp_path, monkeypatch):
+    """auto 模式缺节点：告警跳过，清单记录原因，不提交任何工作流。"""
+    _lipsync_workspace(tmp_path, monkeypatch)
+    fake = _use_fake_client(monkeypatch, missing_nodes={"LatentSyncNode"})
+
+    result = stages.sync_lips()
+
+    assert "error" not in result
+    assert result["skipped"] == 2
+    assert fake.submitted == []
+    manifest = json.loads(
+        (tmp_path / "lipsync" / "manifest.json").read_text(encoding="utf-8")
+    )
+    assert all(s["status"] == "skipped" for s in manifest["shots"])
+    assert any("节点未安装" in s["reason"] for s in manifest["shots"])
+
+
+def test_sync_lips_on_mode_missing_nodes_errors(tmp_path, monkeypatch):
+    """on 模式缺节点是配置错误：阶段报错（预检也会提前拦截）。"""
+    _lipsync_workspace(tmp_path, monkeypatch)
+    monkeypatch.setenv("PROMPT2VID_LIPSYNC", "on")
+    _use_fake_client(monkeypatch, missing_nodes={"LatentSyncNode", "VHS_LoadVideo"})
+
+    result = stages.sync_lips()
+
+    assert "error" in result
+    assert "LatentSyncNode" in result["error"]
+
+
+def test_sync_lips_off_mode_skips(tmp_path, monkeypatch):
+    monkeypatch.setenv("PROMPT2VID_LIPSYNC", "off")
+    result = stages.sync_lips()
+    assert result.get("skipped") == "PROMPT2VID_LIPSYNC=off"
+
+
+def test_sync_lips_without_audio_marks_skipped(tmp_path, monkeypatch):
+    """没有配音的镜头无从驱动口型：标记 skipped，保留原片段。"""
+    _lipsync_workspace(tmp_path, monkeypatch, with_audio=False)
+    fake = _use_fake_client(monkeypatch)
+
+    result = stages.sync_lips()
+
+    assert result["skipped"] == 2
+    assert result["succeeded"] == 0
+    assert fake.submitted == []
+    manifest = json.loads(
+        (tmp_path / "lipsync" / "manifest.json").read_text(encoding="utf-8")
+    )
+    assert all(s["status"] == "skipped" for s in manifest["shots"])
+    assert any("无配音" in s["reason"] for s in manifest["shots"])
+
+
+def test_sync_lips_resume_skips_existing(tmp_path, monkeypatch):
+    """断点续跑：已有产物的镜头不再提交，仍计入成功。"""
+    ws = _lipsync_workspace(tmp_path, monkeypatch)
+    _fake_durations(monkeypatch, clip_seconds=2.0, audio_seconds=5.0)
+    first = _use_fake_client(monkeypatch)
+    stages.sync_lips()
+    assert len(first.submitted) == 2
+
+    second = _use_fake_client(monkeypatch)
+    result = stages.sync_lips()
+
+    assert second.submitted == []
+    assert result["succeeded"] == 2
+    manifest = json.loads((ws / "lipsync" / "manifest.json").read_text(encoding="utf-8"))
+    assert all(s["status"] == "ok" for s in manifest["shots"])
+
+
 @pytest.mark.skipif(not HAS_FFMPEG, reason="本机未安装 ffmpeg/ffprobe")
 def test_render_final_and_quality_checks(tmp_path, monkeypatch):
     """用 lavfi 合成假片段与假配音，验证确定性剪辑与质检全链路。"""
@@ -522,7 +739,87 @@ def test_render_final_and_quality_checks(tmp_path, monkeypatch):
 
 
 @pytest.mark.skipif(not HAS_FFMPEG, reason="本机未安装 ffmpeg/ffprobe")
+def test_render_final_upscales_to_target_width(tmp_path, monkeypatch):
+    """PROMPT2VID_UPSCALE=720：512x768 源 → 720x1080 成片，报告记录放大。"""
+    ws = _setup_workspace(tmp_path, monkeypatch)
+    monkeypatch.setenv("PROMPT2VID_UPSCALE", "720")
+
+    for shot_id in (1, 2):
+        clip = ws / "clips" / f"shot_{shot_id}.webm"
+        clip.parent.mkdir(parents=True, exist_ok=True)
+        subprocess.run(
+            [FFMPEG, "-hide_banner", "-loglevel", "error", "-y",
+             "-f", "lavfi", "-i", "testsrc=size=512x768:rate=25",
+             "-t", "1", "-c:v", "libvpx-vp9", str(clip)],
+            check=True,
+        )
+        audio = ws / "audio" / f"shot_{shot_id}.mp3"
+        audio.parent.mkdir(parents=True, exist_ok=True)
+        subprocess.run(
+            [FFMPEG, "-hide_banner", "-loglevel", "error", "-y",
+             "-f", "lavfi", "-i", "sine=frequency=440", "-t", "0.8", str(audio)],
+            check=True,
+        )
+    entries = [
+        {"id": i, "video": f"clips/shot_{i}.webm", "status": "ok",
+         "path": str(ws / "clips" / f"shot_{i}.webm")}
+        for i in (1, 2)
+    ]
+    (ws / "clips" / "manifest.json").write_text(
+        json.dumps({"shots": entries}, ensure_ascii=False), encoding="utf-8",
+    )
+    (ws / "audio" / "manifest.json").write_text(
+        json.dumps({"shots": [
+            {"id": i, "audio": f"audio/shot_{i}.mp3", "status": "ok",
+             "path": str(ws / "audio" / f"shot_{i}.mp3")} for i in (1, 2)
+        ]}, ensure_ascii=False), encoding="utf-8",
+    )
+
+    render = stages.render_final()
+    assert "error" not in render, render
+    # 512x768 → 720 宽（高按宽高比 → 1080，偶数）
+    assert render["width"] == 720
+    assert render["height"] == 1080
+    assert render["upscale"] == {"from": [512, 768], "to": [720, 1080]}
+
+
+@pytest.mark.skipif(not HAS_FFMPEG, reason="本机未安装 ffmpeg/ffprobe")
 def test_render_final_reports_missing_clips(tmp_path, monkeypatch):
     monkeypatch.setenv("PROMPT2VID_WORKSPACE", str(tmp_path))
     result = stages.render_final()
     assert "error" in result
+
+
+@pytest.mark.skipif(not HAS_FFMPEG, reason="本机未安装 ffmpeg/ffprobe")
+def test_quality_checks_flag_silent_voiceover(tmp_path, monkeypatch):
+    """全部旁白无声（TTS 被拦截的静音占位）→ voiceover_audible 不通过。"""
+    ws = _setup_workspace(tmp_path, monkeypatch)
+    final = ws / "final" / "final.mp4"
+    final.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        [FFMPEG, "-hide_banner", "-loglevel", "error", "-y",
+         "-f", "lavfi", "-i", "testsrc=size=512x768:rate=25", "-t", "2",
+         "-f", "lavfi", "-i", "anullsrc=r=44100:cl=mono", "-t", "2",
+         "-c:v", "libx264", "-c:a", "aac", "-shortest", str(final)],
+        check=True,
+    )
+    audio = ws / "audio" / "shot_1.mp3"
+    audio.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        [FFMPEG, "-hide_banner", "-loglevel", "error", "-y",
+         "-f", "lavfi", "-i", "anullsrc=r=24000:cl=mono", "-t", "1",
+         "-c:a", "libmp3lame", str(audio)],
+        check=True,
+    )
+    (ws / "audio" / "manifest.json").write_text(
+        json.dumps({"shots": [
+            {"id": 1, "audio": "audio/shot_1.mp3", "status": "ok",
+             "path": str(audio)}
+        ]}, ensure_ascii=False), encoding="utf-8",
+    )
+
+    report = stages.run_quality_checks()
+    check = next(c for c in report["checks"] if c["name"] == "voiceover_audible")
+    assert not check["passed"]
+    assert "TTS" in check["detail"]
+    assert not report["passed"]

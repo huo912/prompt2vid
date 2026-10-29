@@ -62,10 +62,11 @@ def test_steps_catalog(client):
     res = client.get("/api/steps")
     assert res.status_code == 200
     catalog = res.json()["steps"]
-    assert len(catalog) == 9
+    assert len(catalog) == 10
     assert catalog[0]["id"] == "analyze_requirement"
     assert catalog[0]["kind_label"] == "创意"
-    assert catalog[6]["stage"] == "render"  # edit_video
+    assert catalog[6]["id"] == "sync_lips"  # 口型同步（配音与剪辑之间）
+    assert catalog[7]["stage"] == "render"  # edit_video
 
 
 def test_index_page(client):
@@ -89,7 +90,7 @@ def test_create_and_list_run(client):
     assert len(runs) == 1
     assert runs[0]["id"] == run_id
     assert runs[0]["prompt"] == "做一个秋天的治愈系短视频"
-    assert runs[0]["total"] == 9
+    assert runs[0]["total"] == 10
 
 
 def test_create_run_rejects_blank_prompt(client):

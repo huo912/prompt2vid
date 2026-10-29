@@ -4,12 +4,13 @@
 
 ## 项目简介
 
-prompt2vid 是一个多智能体视频生产系统：用户只需给出一句简单的描述（例如"做一个关于秋天的治愈系短视频"），系统即可自动完成 **需求分析 → 剧本撰写 → 分镜规划 → 图像生成 → 视频生成 → 配音 → 剪辑合成 → 质量检查 → 抖音发布** 的全流程，无需人工介入。
+prompt2vid 是一个多智能体视频生产系统：用户只需给出一句简单的描述（例如"做一个关于秋天的治愈系短视频"），系统即可自动完成 **需求分析 → 剧本撰写 → 分镜规划 → 图像生成 → 视频生成 → 配音 → 口型同步 → 剪辑合成 → 质量检查 → 抖音发布** 的全流程，无需人工介入。
 
 - **多智能体协作**：基于 CrewAI，9 个专家 Agent 顺序流水线协作，每个 Agent / Task 均为独立文件，方便扩展与替换。
 - **角色一致性**：分镜表支持 `characters` 角色卡（固定英文外观描述逐字进入每镜 image_prompt，代码兜底补入）；可选开启 IPAdapter 定妆照参考注入，让出场人物全片长相一致。
 - **视频生成**：ComfyUI + LTX-Video 2B（RTX 4060 8GB 显存即可运行），文生图（SDXL）+ 图生视频（LTXV）。
-- **配音**：edge-tts（免费、支持中文，无需额外 API Key）。
+- **配音**：IndexTTS-2.5（B 站开源，ComfyUI 本地推理，中文自然度第一梯队，自带 59 个音色并支持声音克隆）；未装节点时自动回退 edge-tts / OpenAI 兼容网关 / piper，每次降级都有日志告警。
+- **口型同步**：LatentSync 1.6（字节跳动）用配音驱动每镜人物唇形，嘴动与旁白对上（约需 20GB 显存，4090/24GB 档可用）；无正脸/动漫脸镜头自动保留原片段，不阻塞出片。
 - **剪辑**：ffmpeg 拼接分镜片段、混音、烧录字幕。
 - **发布**：抖音开放平台 API；`DOUYIN_DRY_RUN=true` 时仅记录状态不真实上传。
 - **部署**：单节点 k8s（ComfyUI 以 GPU Pod 运行，本服务以 kagent BYO Harness 运行），配置开箱即用。
@@ -32,19 +33,19 @@ flowchart LR
     A4 -. "generate_frames 阶段工具" .-> S["确定性阶段引擎<br/>stages.py"]
     A5 -. "generate_clips 阶段工具" .-> S
     A6 -. "generate_voiceovers 阶段工具" .-> S
-    A7 -. "render_final 阶段工具" .-> S
+    A7 -. "sync_lips / render_final 阶段工具" .-> S
     A8 -. "run_quality_checks 阶段工具" .-> S
     S --> C["ComfyUI (GPU)"]
     A9 --> D["抖音开放平台"]
 ```
 
 **LLM 负责创意，代码负责执行**：需求分析 → 剧本 → 分镜由 LLM agent 生成
-（经 file_tool 写入工作目录）；生图、生视频、配音、剪辑、质检五个媒体
-阶段由 agent 调用一次性"阶段工具"（`generate_frames` / `generate_clips` /
-`generate_voiceovers` / `render_final` / `run_quality_checks`），阶段工具
-内部由 `stages.py` 确定性代码**整批提交 ComfyUI**（GPU 队列连续执行）、
-自动重试、写 manifest——不依赖 LLM 循环调用工具，不受 agent 迭代上限
-约束，也不会编造路径。
+（经 file_tool 写入工作目录）；生图、生视频、配音、口型同步、剪辑、质检
+六个媒体阶段由 agent 调用一次性"阶段工具"（`generate_frames` /
+`generate_clips` / `generate_voiceovers` / `sync_lips` / `render_final` /
+`run_quality_checks`），阶段工具内部由 `stages.py` 确定性代码**整批提交
+ComfyUI**（GPU 队列连续执行）、自动重试、写 manifest——不依赖 LLM 循环
+调用工具，不受 agent 迭代上限约束，也不会编造路径。
 
 两种执行模式（`PROMPT2VID_DIRECT_MEDIA` / CLI `--direct-media`）：
 - **crew 模式**（默认）：9 agent 全流程，A2A/kagent 形态；
@@ -61,7 +62,7 @@ flowchart LR
 | 4 | image_generator 图像生成师 | 发起批量首帧图生成并汇报结果 | generate_frames（阶段工具） |
 | 5 | video_generator 视频生成师 | 发起批量图生视频并汇报结果 | generate_clips（阶段工具） |
 | 6 | voiceover_artist 配音师 | 发起批量中文配音并汇报结果 | generate_voiceovers（阶段工具） |
-| 7 | video_editor 剪辑师 | 发起确定性剪辑（拼接/对齐/字幕/混流）并汇报结果 | render_final + probe |
+| 7 | video_editor 剪辑师 | 先发起口型同步（配音驱动唇形），再发起确定性剪辑（拼接/对齐/字幕/混流）并汇报结果 | sync_lips + render_final + probe |
 | 8 | quality_inspector 质检师 | 发起确定性质检并汇报结论 | run_quality_checks（阶段工具） |
 | 9 | douyin_publisher 抖音发布专家 | 撰写标题标签，通过抖音开放平台 API 上传并发布 | DouyinTool |
 
@@ -85,7 +86,7 @@ prompt2vid/
 │   ├── main.py                # CLI 入口：python -m prompt2vid.main "描述"
 │   ├── server.py              # A2A 服务器（a2a-sdk，kagent 可调用）+ Web 控制台挂载
 │   ├── pipeline.py            # 流水线编排（crew/直连模式、续跑、清理、run.log）
-│   ├── steps.py               # 分步执行（9 步注册表 + 单步执行器 + steps.json）
+│   ├── steps.py               # 分步执行（10 步注册表 + 单步执行器 + steps.json）
 │   ├── webui.py               # Web 调试控制台（REST API + 后台执行管理）
 │   ├── web/                   # 控制台页面（原生 HTML/JS/CSS，无构建工具）
 │   ├── dynamic_llm.py         # LLM 配置（按 agent 覆盖模型，前缀自动补齐+实例缓存）
@@ -94,7 +95,7 @@ prompt2vid/
 │   ├── storyboard.py          # 分镜表宽松解析与修复
 │   ├── llm_output.py          # LLM 最终回答的产物抢救（未调用写文件工具时兜底）
 │   ├── comfyui_client.py      # ComfyUI HTTP 客户端（连接池/退避轮询/批量等待）
-│   ├── tts.py                 # edge-tts 配音纯函数（带回退链）
+│   ├── tts.py                 # 配音纯函数（IndexTTS-2.5 → edge-tts 回退链）
 │   ├── ffmpeg_ops.py          # ffmpeg 剪辑纯函数（探测/拼接/对齐/SRT/混流）
 │   ├── workspace.py           # 统一工作目录解析
 │   ├── agent-card.json        # A2A Agent Card
@@ -131,11 +132,11 @@ prompt2vid --resume output/run_20260101_120000 --from render --publish
 prompt2vid --clean --keep 5
 ```
 
-每次运行会在 `output/run_<时间戳>/` 下产出：`requirement.json`、`script.md`、`storyboard.json`、`frames/`（分镜首帧）、`clips/`（分镜视频）、`audio/`（配音）、`final/`（成片 + 字幕）、`report/`（质检报告）。
+每次运行会在 `output/run_<时间戳>/` 下产出：`requirement.json`、`script.md`、`storyboard.json`、`frames/`（分镜首帧）、`clips/`（分镜视频）、`audio/`（配音）、`lipsync/`（口型同步片段，装好节点时）、`final/`（成片 + 字幕）、`report/`（质检报告）。
 
 ## 分步调试（Web 控制台）
 
-调试时不必整条流水线跑到底——9 个 agent 步骤可以拆开单独执行、单独重跑：
+调试时不必整条流水线跑到底——10 个步骤可以拆开单独执行、单独重跑：
 
 ```bash
 prompt2vid-server            # 或 python -m prompt2vid.server
@@ -158,7 +159,7 @@ prompt2vid "..." --only analyze_requirement,write_script    # 新建运行只跑
 prompt2vid --resume output/run_xxx --only render --force    # 复用已有产物，强制重跑渲染
 ```
 
-说明：创意步骤（需求 / 剧本 / 分镜）与发布走 LLM 单任务 crew；媒体五步直接执行 `stages.py` 的确定性函数——与对应 agent 转调的阶段工具是同一实现，只是省掉一次 LLM 往返。
+说明：创意步骤（需求 / 剧本 / 分镜）与发布走 LLM 单任务 crew；媒体六步（生图/生视频/配音/口型同步/剪辑/质检）直接执行 `stages.py` 的确定性函数——与对应 agent 转调的阶段工具是同一实现，只是省掉一次 LLM 往返。
 
 **产物兜底**：小参数本地模型常把 JSON/Markdown 贴在最终回答里而不调用写文件工具。此时创意步骤会尝试从最终回答中抢救产物（`llm_output.py`，JSON 需可解析且 `shots` 非空才落盘，寒暄类回答一律拒绝），抢救成功的步骤在 `steps.json` 的 summary 里带 `⚠ 产物由代码从最终回答抢救写入`。这只影响能否继续往下跑，不保证内容质量——生产环境建议使用支持工具调用的模型。
 
@@ -234,8 +235,10 @@ curl -X POST http://<pod-ip>:8081/a2a/jsonrpc \
 
 > 本地运行的完整配置手册（模型清单、hf-mirror 下载命令、ffmpeg 安装、
 > 8GB 显存调优）见 **[docs/LOCAL_SETUP.md](docs/LOCAL_SETUP.md)**；
+> 按显卡档位的画质调优（放大/补帧/超分/换底模/对症速查）见
+> **[docs/QUALITY.md](docs/QUALITY.md)**；
 > ComfyUI 零基础配置指南（哪个节点用哪个模型、文件放哪里）见
-> **[docs/deploy.md](docs/deploy.md)**；
+> [docs/deploy.md](docs/deploy.md)；
 > k8s 部署的模型下载见 [deploy/comfyui/MODELS.md](deploy/comfyui/MODELS.md)。
 
 | 模型 | 用途 | 放置路径（ComfyUI PVC 内） | 下载 |
@@ -245,6 +248,8 @@ curl -X POST http://<pod-ip>:8081/a2a/jsonrpc \
 | T5-XXL fp8 | LTX 文本编码器（8GB 显存必须用 fp8） | `models/text_encoders/t5xxl_fp8_e4m3fn.safetensors` | huggingface.co/comfyanonymous/flux_text_encoders |
 
 > 显存预算：RTX 4060 8GB 下，T5 必须使用 fp8 量化版（fp16 约 9GB+ 会 OOM）；`COMFYUI_T5_DEVICE=cpu` 可进一步把文本编码放到内存（64GB 宿主机内存充足）。
+
+> 可选增强（无需改动基础模型表）：**配音升级 IndexTTS-2.5**（约 12GB 显存）与**口型同步 LatentSync 1.6**（约 20GB 显存）各需在 ComfyUI 安装一个自定义节点并下载模型，安装命令见 [docs/LOCAL_SETUP.md](docs/LOCAL_SETUP.md) §配音升级 / §口型同步；未安装时配音走 edge-tts 回退链、口型同步自动跳过，流水线照常出片。
 
 ## 抖音开放平台凭据
 
@@ -264,9 +269,12 @@ curl -X POST http://<pod-ip>:8081/a2a/jsonrpc \
 
 | 配置文件 | 显卡 | 模型组合 | 模型总量 |
 |----------|------|----------|----------|
-| `.env.4060` | 本地 4060（8GB） | SDXL Base + LTX 2B | 约 13.8GB |
+| `.env.4060` | 本地 4060（8GB） | SDXL Base + LTX 2B + 渲染放大到 720 宽 | 约 13.8GB |
 | `.env.4090` | 云机 4090（24GB） | RealVisXL V5 + LTX 13B fp8 + IPAdapter | 约 30.9GB |
-| `.env.5090` | 云机 5090（32GB） | 同 4090，T5 上 GPU、可上 720p | 约 30.9GB |
+| `.env.5090` | 云机 5090（32GB） | 同 4090，T5 上 GPU、默认 720p 生成 | 约 30.9GB |
+
+> 各档位的画质参数依据与进一步调优（放大/补帧/超分/换底模）见
+> **[docs/QUALITY.md](docs/QUALITY.md)**。
 
 切换方式（三选一；不指定时默认加载 `.env`，即本地 4060 档）：
 
@@ -296,8 +304,14 @@ export PROMPT2VID_PROFILE=4090                    # 或只给档位简名
 | `COMFYUI_LTX_LORA` / `COMFYUI_LTX_LORA_STRENGTH` | LTX 图生视频风格 LoRA（`LoraLoaderModelOnly` 加载，LTX checkpoint 无 CLIP）；LTX 2B 无现成动漫 LoRA 留空，13B 档推荐新海诚风格 LoRA |
 | `COMFYUI_T2I_WIDTH` / `COMFYUI_T2I_HEIGHT` | 首帧画幅（默认 768x1344 竖屏；视频画幅会跟随首帧自动换算成 32 的倍数，避免人物被裁变形） |
 | `COMFYUI_T2I_STEPS` / `COMFYUI_LTX_STEPS` / `COMFYUI_LTX_CFG` | 采样步数/cfg（SDXL 默认 25；LTX 留空按模型自动：distilled → cfg 1.0 / 8 步，13B dev → cfg 3.0 / 30 步，2B → cfg 3.0 / 10 步） |
-| `COMFYUI_LTX_MAX_PIXELS` / `COMFYUI_LTX_WIDTH` / `COMFYUI_LTX_HEIGHT` | LTX 单帧像素预算（2B 默认 512x768，13B 自动 576x1024；可设 921600 上 720p）或显式固定画幅（32 倍数） |
+| `COMFYUI_T2I_CFG` / `COMFYUI_T2I_SAMPLER` / `COMFYUI_T2I_SCHEDULER` | 文生图采样参数（默认 7.0 / dpmpp_2m / karras；写实系 SDXL 建议 CFG 6） |
+| `COMFYUI_WEBM_CRF` | LTX 中转 WEBM 质量（VP9 CRF，默认 20；旧版 32 有压缩色带） |
+| `COMFYUI_LTX_MAX_PIXELS` / `COMFYUI_LTX_WIDTH` / `COMFYUI_LTX_HEIGHT` | LTX 单帧像素预算（2B 默认 512x768，13B 自动 576x1024，5090 档默认 921600 即 720p）或显式固定画幅（32 倍数） |
 | `COMFYUI_LTX_PROMPT_SUFFIX` | 追加到 LTX 正向提示词的肢体稳定约束（默认 `consistent anatomy, natural body proportions, stable limbs, detailed hands`） |
+| `PROMPT2VID_UPSCALE` / `PROMPT2VID_UPSCALE_SHARPEN` | 成片放大目标（如 `720`，lanczos+轻锐化，字幕按最终分辨率烧录；源已达标自动跳过）与锐化强度（默认 0.3） |
+| `PROMPT2VID_SMOOTH_FPS` | 可选 CPU 补帧（minterpolate，建议 50；快速运动可能形变，默认关） |
+| `PROMPT2VID_TRANSITION` / `PROMPT2VID_TRANSITION_TYPE` | 镜头间交叉过渡（默认 0.5s `fade` 叠化；设 0 关闭回硬切；音轨/字幕时间轴不受影响） |
+| `PROMPT2VID_VIDEO_CRF` / `PROMPT2VID_CLIP_CRF` / `PROMPT2VID_X264_PRESET` | 转码质量分层：成片 CRF 18 / 中转 CRF 16 / x264 预设 medium |
 | `COMFYUI_RETRIES` | 单镜生成失败重试次数（默认 2，按批次重试） |
 | `COMFYUI_IPADAPTER` | true 时启用角色一致性参考注入（分镜表含 `characters` 时先生成角色定妆照，出镜分镜首帧注入参考；需 ComfyUI 装 ComfyUI_IPAdapter_plus + 两个模型，见 [docs/LOCAL_SETUP.md](docs/LOCAL_SETUP.md) 第 6 节；未就位时自动回退无参考生成） |
 | `COMFYUI_IPADAPTER_PRESET` / `COMFYUI_IPADAPTER_WEIGHT` | IPAdapter 预设与注入权重（默认 `PLUS FACE (portraits)` / 0.8） |
@@ -308,6 +322,11 @@ export PROMPT2VID_PROFILE=4090                    # 或只给档位简名
 | `PROMPT2VID_SUBTITLE_STYLE` | 字幕烧录样式（libass force_style） |
 | `PROMPT2VID_FFMPEG` / `PROMPT2VID_FFPROBE` | 指定 ffmpeg/ffprobe 可执行文件路径（不设则按 PATH → 常见目录 → 随包二进制查找；ffprobe 缺失时探测自动回退解析 ffmpeg 输出） |
 | `DOUYIN_DRY_RUN` | true 时抖音发布仅记录状态 |
+| `PROMPT2VID_TTS_ENGINE` | 配音引擎（`auto` 默认 / `comfyui` / `edge` / `gateway` / `piper`；auto 按序尝试，每级降级都有日志告警） |
+| `PROMPT2VID_TTS_TIMBRE` / `PROMPT2VID_TTS_REF_AUDIO` | IndexTTS 音色：插件自带音色文件名（默认 `甜美女声.mp3`，共 59 个）或自定义克隆参考音频（3-15 秒干净人声） |
+| `PROMPT2VID_TTS_SPEED` / `PROMPT2VID_TTS_SILENCE_MS` / `PROMPT2VID_TTS_KEEP_CACHED` | IndexTTS 语速（>1 变慢）/ 句间停顿毫秒（默认 200）/ 模型是否留显存（默认开） |
+| `PROMPT2VID_LIPSYNC` / `PROMPT2VID_LIPSYNC_EXPRESSION` / `PROMPT2VID_LIPSYNC_STEPS` | 口型同步开关（`auto` 默认，节点齐全才跑 / `on` / `off`）/ 唇形表现力（默认 1.5）/ 推理步数（默认 20）；需 ComfyUI 装 LatentSyncWrapper + VideoHelperSuite（约 20GB 显存） |
+| `PROMPT2VID_TTS_PIPER_MODEL` / `EDGE_TTS_PROXY` | 回退链：piper 离线配音音色（默认探测 `models/tts/`）与 edge-tts 代理（公司网络拦 403 时用，见 [docs/QUALITY.md](docs/QUALITY.md) §配音） |
 
 ## 测试
 

@@ -52,6 +52,14 @@ POLL_MAX = 5.0
 # 30 步不会更好，只会慢 2-3 倍。SDXL 25 步 dpmpp_2m 足够。
 DEFAULT_T2I_STEPS = 25
 DEFAULT_LTX_STEPS = 10
+# T2I 采样参数（SDXL 系）。CFG/sampler/scheduler 可按 checkpoint 微调：
+# SDXL Base 7.0 / dpmpp_2m / karras；RealVisXL V5 等写实系建议 CFG 6 左右。
+DEFAULT_T2I_CFG = 7.0
+DEFAULT_T2I_SAMPLER = "dpmpp_2m"
+DEFAULT_T2I_SCHEDULER = "karras"
+# WEBM 中转片段质量：VP9 CRF。旧值 32 压缩过狠，渐变/暗部会有色带，
+# 且这些片段之后还要再经历两次转码；20 足够干净且文件仍小。
+DEFAULT_WEBM_CRF = 20.0
 
 # 自动挑选替代 checkpoint 时的优先级（t2i）：写实/通用 SDXL 系模型。
 # LTX 是图生视频模型，不能拿来文生图。
@@ -87,8 +95,35 @@ DEFAULT_LTX_NEGATIVE = (
 DEFAULT_IPADAPTER_PRESET = "PLUS FACE (portraits)"
 DEFAULT_IPADAPTER_WEIGHT = 0.8
 
-# LTX 输出帧率（与 LTXVConditioning.frame_rate 保持一致）
+# 配音（IndexTTS-2.5，经 chenpipi0807/ComfyUI-Index-TTS 自定义节点，
+# 见 docs/LOCAL_SETUP.md）。默认音色取插件 TimbreModel 目录自带的
+# "甜美女声"，全部候选见该目录（59 个，含新闻女声/说书人/御姐等）；
+# PROMPT2VID_TTS_REF_AUDIO 指向自己的录音时可克隆自定义音色。
+DEFAULT_TTS_TIMBRE = "甜美女声.mp3"
+DEFAULT_TTS_LANG = "ZH"
+DEFAULT_TTS_SPEED = 1.0
+# 句间停顿（毫秒）：IndexTTS 的 interval_silence_ms，200ms 让长句
+# 旁白有自然换气感，而不是一口气念完
+DEFAULT_TTS_SILENCE_MS = 200
+
+# 口型同步（LatentSync 1.6，经 ShmuelRonen/ComfyUI-LatentSyncWrapper
+# 自定义节点 + VideoHelperSuite，见 docs/LOCAL_SETUP.md）。
+# lips_expression 即 guidance_scale：1.0-1.5 平静语速自然，2.0-3.0
+# 演讲式夸张；推理步数 20 够用，30-50 更慢更稳。
+DEFAULT_LIPSYNC_EXPRESSION = 1.5
+DEFAULT_LIPSYNC_STEPS = 20
+DEFAULT_LIPSYNC_CRF = 19
+
+# LTX 输出帧率（与 LTXVConditioning.frame_rate 保持一致）。
+# 经 COMFYUI_LTX_FPS 配置：stages 的时长→帧数换算、LTXVConditioning、
+# SaveWEBM 与剪辑阶段的 fps 必须一致，否则配音/时长会对不上。
 LTX_FPS = 25.0
+
+
+def ltx_fps() -> float:
+    """当前 LTX 帧率（COMFYUI_LTX_FPS，默认 25；非法值回退默认）。"""
+    fps = env_float("COMFYUI_LTX_FPS", LTX_FPS)
+    return fps if fps > 0 else LTX_FPS
 
 # 种子计数器：PROMPT2VID_SEED 固定后，逐次 +1 保证分镜间种子不同但整跑可复现
 _SEED_COUNTER = itertools.count()
@@ -328,7 +363,9 @@ def parse_output_files(entry: dict[str, Any]) -> list[dict[str, str]]:
         if isinstance(ui, dict):
             containers.append(ui)
         for container in containers:
-            for key in ("images", "gifs", "videos", "images_preview"):
+            # "audio" 是 SaveAudio 的输出键（IndexTTS 配音经它落盘）；
+            # "gifs" 是 VHS_VideoCombine 的历史遗留键（口型同步产物）
+            for key in ("images", "gifs", "videos", "images_preview", "audio"):
                 items = container.get(key)
                 if not isinstance(items, list):
                     continue
@@ -364,6 +401,8 @@ class ComfyUIClient:
         self._http = http or httpx.Client(timeout=30.0)
         # 已解析的模型文件名缓存（role → 文件名；LoRA 的空串表示"已确认关闭"）
         self._checkpoint_cache: dict[str, str] = {}
+        # object_info 的节点定义缓存（class_type → 定义；空 dict = 查询失败/不存在）
+        self._node_spec_cache: dict[str, dict[str, Any]] = {}
 
     def close(self) -> None:
         self._http.close()
@@ -387,6 +426,60 @@ class ComfyUIClient:
         except ValueError:
             return {}
         return data if isinstance(data, dict) else {}
+
+    def node_spec(self, node: str) -> dict[str, Any]:
+        """节点定义（object_info 结果进程内缓存）；不存在/查询失败返回空 dict。"""
+        if node not in self._node_spec_cache:
+            self._node_spec_cache[node] = self.object_info(node).get(node) or {}
+        return self._node_spec_cache[node]
+
+    def node_exists(self, node: str) -> bool:
+        """ComfyUI 是否注册了该节点（自定义节点是否安装的判定依据）。"""
+        return bool(self.node_spec(node))
+
+    def declared_inputs(self, node: str) -> set[str]:
+        """节点声明的全部输入名（required + optional + hidden + 扁平旧格式）。
+
+        空集合表示定义未知（节点不存在 / object_info 不可用）。
+        """
+        spec = self.node_spec(node)
+        inputs = spec.get("input") or {}
+        if not isinstance(inputs, dict):
+            return set()
+        # 扁平旧格式的字段名直接挂在 input 下；嵌套格式下顶层键是
+        # 分组名（required/optional/hidden），不能算输入名
+        names = {
+            key for key in inputs
+            if isinstance(key, str) and key not in ("required", "optional", "hidden")
+        }
+        for group in ("required", "optional", "hidden"):
+            group_inputs = inputs.get(group)
+            if isinstance(group_inputs, dict):
+                names.update(group_inputs.keys())
+        return names
+
+    def filter_workflow_inputs(self, workflow: dict[str, Any]) -> dict[str, Any]:
+        """按服务端节点定义过滤工作流里未声明的输入键（返回副本）。
+
+        自定义节点（VideoHelperSuite 等）不同版本的输入集有差异：送出
+        未声明的键会被 ComfyUI 静默忽略，但缺 required 键会被 400 拒绝。
+        这里只保留服务端声明过的键，让同一份构建器适配新旧版本；定义
+        查询失败时原样保留（由 submit 的 400 错误兜底定位）。
+        """
+        filtered: dict[str, Any] = {}
+        for node_id, node in workflow.items():
+            class_type = str(node.get("class_type") or "")
+            declared = self.declared_inputs(class_type) if class_type else set()
+            if not declared:
+                filtered[node_id] = node
+                continue
+            inputs = {
+                key: value
+                for key, value in (node.get("inputs") or {}).items()
+                if key in declared
+            }
+            filtered[node_id] = {**node, "inputs": inputs}
+        return filtered
 
     def available_checkpoints(self) -> list[str]:
         """ComfyUI 当前可用的 checkpoint 文件名（查询失败时为空列表）。"""
@@ -583,12 +676,16 @@ class ComfyUIClient:
         dest.write_bytes(resp.content)
         return dest
 
-    def upload_image(self, image_path: Path, name: str | None = None) -> str:
-        """上传图片到 ComfyUI input 目录，返回上传后的文件名。"""
-        image_path = Path(image_path)
-        name = name or image_path.name
-        mime = mimetypes.guess_type(image_path.name)[0] or "image/png"
-        with image_path.open("rb") as f:
+    def upload_file(self, file_path: Path, name: str | None = None) -> str:
+        """上传任意文件（图片/音频/视频）到 ComfyUI input 目录，返回文件名。
+
+        ComfyUI 的 /upload/image 不校验扩展名，VHS/LatentSync 等自定义
+        节点的音频、视频同样经它上传，之后用文件名在节点里引用。
+        """
+        file_path = Path(file_path)
+        name = name or file_path.name
+        mime = mimetypes.guess_type(file_path.name)[0] or "application/octet-stream"
+        with file_path.open("rb") as f:
             resp = self._http.post(
                 f"{self.base_url}/upload/image",
                 files={"image": (name, f, mime)},
@@ -597,6 +694,11 @@ class ComfyUIClient:
             )
         resp.raise_for_status()
         return resp.json()["name"]
+
+    def upload_image(self, image_path: Path, name: str | None = None) -> str:
+        """上传图片到 ComfyUI input 目录，返回上传后的文件名。"""
+        image_path = Path(image_path)
+        return self.upload_file(image_path, name or image_path.name)
 
 
 def build_t2i_workflow(
@@ -662,9 +764,9 @@ def build_t2i_workflow(
                 "model": ["44", 0],
                 "seed": seed if seed is not None else next_seed(),
                 "steps": env_int("COMFYUI_T2I_STEPS", DEFAULT_T2I_STEPS),
-                "cfg": 7.0,
-                "sampler_name": "dpmpp_2m",
-                "scheduler": "karras",
+                "cfg": env_float("COMFYUI_T2I_CFG", DEFAULT_T2I_CFG),
+                "sampler_name": env_str("COMFYUI_T2I_SAMPLER", DEFAULT_T2I_SAMPLER),
+                "scheduler": env_str("COMFYUI_T2I_SCHEDULER", DEFAULT_T2I_SCHEDULER),
                 "positive": ["6", 0],
                 "negative": ["7", 0],
                 "latent_image": ["70", 0],
@@ -854,22 +956,27 @@ def build_i2v_workflow(
             "inputs": {
                 "positive": ["95", 0],
                 "negative": ["95", 1],
-                "frame_rate": LTX_FPS,
+                "frame_rate": ltx_fps(),
             },
         },
+        # max_shift/base_shift 是官方 simple 工作流的默认值（按 512-768p
+        # 调校）；分辨率/帧数上去后可经 COMFYUI_LTX_MAX_SHIFT /
+        # COMFYUI_LTX_BASE_SHIFT 微调（详见 docs/QUALITY.md）。
         "71": {
             "class_type": "LTXVScheduler",
             "inputs": {
                 "steps": steps,
-                "max_shift": 2.05,
-                "base_shift": 0.95,
+                "max_shift": env_float("COMFYUI_LTX_MAX_SHIFT", 2.05),
+                "base_shift": env_float("COMFYUI_LTX_BASE_SHIFT", 0.95),
                 "stretch": True,
                 "terminal": 0.1,
             },
         },
         "73": {
             "class_type": "KSamplerSelect",
-            "inputs": {"sampler_name": "euler"},
+            "inputs": {
+                "sampler_name": env_str("COMFYUI_LTX_SAMPLER", "euler"),
+            },
         },
         "72": {
             "class_type": "SamplerCustom",
@@ -899,8 +1006,8 @@ def build_i2v_workflow(
                 "images": ["8", 0],
                 "filename_prefix": "prompt2vid",
                 "codec": "vp9",
-                "fps": LTX_FPS,
-                "crf": 32.0,
+                "fps": ltx_fps(),
+                "crf": env_float("COMFYUI_WEBM_CRF", DEFAULT_WEBM_CRF),
             },
         },
     }
@@ -996,3 +1103,178 @@ def run_image_to_video(
         lora=lora,
     )
     return run_workflow(workflow, Path(dest), client)
+
+
+def build_tts_workflow(
+    text: str,
+    filename_prefix: str = "prompt2vid_tts",
+    reference_audio: str | None = None,
+    timbre: str | None = None,
+    lang: str | None = None,
+    speed: float | None = None,
+    silence_ms: int | None = None,
+    keep_cached: bool | None = None,
+) -> dict[str, Any]:
+    """IndexTTS-2.5 配音工作流（API 格式）。
+
+    节点链（需在 ComfyUI 安装 chenpipi0807/ComfyUI-Index-TTS）：
+    TimbreAudioLoader（自带音色）或 LoadAudio（自定义参考音频，声音克隆）
+    → [IndexTTS25CacheControlNode] → IndexTTS25BaseNode → SaveAudio
+
+    Args:
+        text: 待合成文本（中文）。
+        reference_audio: 已上传到 ComfyUI input 目录的参考音频文件名
+            （3-15 秒干净人声，优先于 timbre——克隆自定义音色用）。
+        timbre: 插件 TimbreModel 目录里的自带音色文件名；缺省读
+            PROMPT2VID_TTS_TIMBRE（默认 "甜美女声.mp3"）。
+        lang: 语种（ZH/EN/JA/ES/AR/ZH/EN），缺省读 PROMPT2VID_TTS_LANG。
+        speed: duration_factor（>1 变慢、<1 变快），缺省读 PROMPT2VID_TTS_SPEED。
+        silence_ms: 句间停顿毫秒数（interval_silence_ms），缺省读
+            PROMPT2VID_TTS_SILENCE_MS（默认 200，长句旁白有换气感）。
+        keep_cached: 推理后模型是否留在显存（整批逐镜合成时避免反复
+            加载 ~8GB 模型）；缺省读 PROMPT2VID_TTS_KEEP_CACHED（默认开）。
+    """
+    timbre = timbre or env_str("PROMPT2VID_TTS_TIMBRE", DEFAULT_TTS_TIMBRE)
+    lang_value = lang or env_str("PROMPT2VID_TTS_LANG", DEFAULT_TTS_LANG)
+    speed_value = env_float("PROMPT2VID_TTS_SPEED", DEFAULT_TTS_SPEED) if speed is None else speed
+    silence = (
+        env_int("PROMPT2VID_TTS_SILENCE_MS", DEFAULT_TTS_SILENCE_MS)
+        if silence_ms is None else silence_ms
+    )
+    if keep_cached is None:
+        keep_cached = os.getenv("PROMPT2VID_TTS_KEEP_CACHED", "1").strip().lower() not in (
+            "0", "false", "no", "off", "",
+        )
+
+    reference_link: list[Any]
+    if reference_audio:
+        # 声音克隆：上传的参考音频经核心 LoadAudio 节点加载
+        reference_node = {
+            "class_type": "LoadAudio",
+            "inputs": {"audio": reference_audio},
+        }
+    else:
+        reference_node = {
+            "class_type": "TimbreAudioLoader",
+            "inputs": {"audio_file": timbre, "refresh": False},
+        }
+
+    tts_inputs: dict[str, Any] = {
+        "text": text,
+        "reference_audio": ["timbre", 0],
+        "lang": lang_value,
+        "duration_factor": speed_value,
+        "interval_silence_ms": silence,
+    }
+    workflow: dict[str, Any] = {"timbre": reference_node}
+    if keep_cached:
+        workflow["cache"] = {
+            "class_type": "IndexTTS25CacheControlNode",
+            "inputs": {"keep_models_cached": True},
+        }
+        tts_inputs["cache_control"] = ["cache", 0]
+    workflow["tts"] = {
+        "class_type": "IndexTTS25BaseNode",
+        "inputs": tts_inputs,
+    }
+    workflow["save"] = {
+        "class_type": "SaveAudio",
+        "inputs": {"audio": ["tts", 0], "filename_prefix": filename_prefix},
+    }
+    return workflow
+
+
+def build_lipsync_workflow(
+    clip_name: str,
+    audio_name: str,
+    mode: str = "pingpong",
+    fps: float | None = None,
+    filename_prefix: str = "prompt2vid_lipsync",
+    seed: int | None = None,
+    expression: float | None = None,
+    steps: int | None = None,
+) -> dict[str, Any]:
+    """LatentSync 口型同步工作流（API 格式）。
+
+    节点链（需在 ComfyUI 安装 ShmuelRonen/ComfyUI-LatentSyncWrapper
+    与 Kosinkadink/ComfyUI-VideoHelperSuite）：
+    VHS_LoadVideo(25fps) + LoadAudio(配音) → VideoLengthAdjuster(长度对齐)
+    → LatentSyncNode(唇形重绘) → VHS_VideoCombine(h264 mp4)
+
+    LatentSync 只认 25fps 且需要与音频等长的帧序列：force_rate 强制
+    25fps，VideoLengthAdjuster 负责长度对齐——mode=pingpong 在配音更长
+    时把片段往返补帧到配音长度（旁白零截断），mode=normal 在片段更长
+    时裁掉多余帧并给音频尾部补静音。
+
+    Args:
+        clip_name / audio_name: 已上传到 ComfyUI input 目录的片段与配音
+            文件名（调用方先 upload_file）。
+        mode: "pingpong"（配音更长，补帧）或 "normal"（片段更长，裁帧）。
+        fps: 帧率，缺省与 LTX 一致（COMFYUI_LTX_FPS，默认 25）。
+        expression: lips_expression（即 guidance_scale），缺省读
+            PROMPT2VID_LIPSYNC_EXPRESSION（默认 1.5，平静语速自然）。
+        steps: 推理步数，缺省读 PROMPT2VID_LIPSYNC_STEPS（默认 20）。
+    """
+    fps_value = ltx_fps() if fps is None else fps
+    expression_value = (
+        env_float("PROMPT2VID_LIPSYNC_EXPRESSION", DEFAULT_LIPSYNC_EXPRESSION)
+        if expression is None else expression
+    )
+    steps_value = (
+        env_int("PROMPT2VID_LIPSYNC_STEPS", DEFAULT_LIPSYNC_STEPS)
+        if steps is None else steps
+    )
+    return {
+        "load_video": {
+            "class_type": "VHS_LoadVideo",
+            "inputs": {
+                "video": clip_name,
+                "force_rate": fps_value,
+                "custom_width": 0,
+                "custom_height": 0,
+                "frame_load_cap": 0,
+                "skip_first_frames": 0,
+                "select_every_nth": 1,
+                "format": "AnimateDiff",
+            },
+        },
+        "load_audio": {
+            "class_type": "LoadAudio",
+            "inputs": {"audio": audio_name},
+        },
+        "adjust": {
+            "class_type": "VideoLengthAdjuster",
+            "inputs": {
+                "images": ["load_video", 0],
+                "audio": ["load_audio", 0],
+                "mode": mode,
+                "fps": fps_value,
+                "silent_padding_sec": 0.5,
+            },
+        },
+        "latentsync": {
+            "class_type": "LatentSyncNode",
+            "inputs": {
+                "images": ["adjust", 0],
+                "audio": ["adjust", 1],
+                "seed": seed if seed is not None else next_seed(),
+                "lips_expression": expression_value,
+                "inference_steps": steps_value,
+            },
+        },
+        "save": {
+            "class_type": "VHS_VideoCombine",
+            "inputs": {
+                "images": ["latentsync", 0],
+                "frame_rate": fps_value,
+                "loop_count": 0,
+                "filename_prefix": filename_prefix,
+                "format": "video/h264-mp4",
+                "pingpong": False,
+                "save_output": True,
+                "codec": "libx264",
+                "crf": env_int("PROMPT2VID_LIPSYNC_CRF", DEFAULT_LIPSYNC_CRF),
+                "pix_fmt": "yuv420p",
+            },
+        },
+    }

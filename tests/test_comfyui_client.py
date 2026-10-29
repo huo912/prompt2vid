@@ -432,3 +432,77 @@ def test_combo_values_handles_all_schema_variants():
         {"input": {"ckpt_name": {"value": ["d.safetensors"], "tooltip": "x"}}},
         "ckpt_name",
     ) == ["d.safetensors"]
+
+
+def test_parse_output_files_includes_audio_key():
+    """SaveAudio 的输出键是 "audio"（IndexTTS 配音经它落盘）。"""
+    entry = {"outputs": {"save": {"audio": [
+        {"filename": "tts_00001.wav", "subfolder": "prompt2vid_tts",
+         "type": "output"},
+    ]}}}
+    files = parse_output_files(entry)
+    assert files == [{
+        "filename": "tts_00001.wav", "subfolder": "prompt2vid_tts",
+        "type": "output",
+    }]
+
+
+def test_upload_file_posts_any_media(tmp_path):
+    """音频/视频同样经 /upload/image 上传（ComfyUI 不校验扩展名）。"""
+    requests_seen: list[str] = []
+    server_names = ["shot_1.webm", "shot_1.mp3"]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests_seen.append(request.url.path)
+        if request.url.path == "/upload/image":
+            return httpx.Response(
+                200, json={"name": server_names[len(requests_seen) - 1]}
+            )
+        return httpx.Response(404)
+
+    client = ComfyUIClient(
+        base_url="http://comfyui.test",
+        http=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    src = tmp_path / "shot_1.webm"
+    src.write_bytes(b"fake-clip")
+    assert client.upload_file(src) == "shot_1.webm"
+    assert requests_seen == ["/upload/image"]
+
+    audio = tmp_path / "shot_1.mp3"
+    audio.write_bytes(b"fake-audio")
+    assert client.upload_file(audio) == "shot_1.mp3"
+    assert requests_seen == ["/upload/image", "/upload/image"]
+
+
+def test_node_exists_and_input_filtering():
+    """node_exists 判定自定义节点；filter_workflow_inputs 剔除未声明输入。"""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/object_info/VHS_LoadVideo":
+            return httpx.Response(200, json={"VHS_LoadVideo": {"input": {
+                "required": {"video": [["a.webm"]], "force_rate": [0]},
+                "optional": {"format": ["AnimateDiff"]},
+            }}})
+        return httpx.Response(404)
+
+    client = ComfyUIClient(
+        base_url="http://comfyui.test",
+        http=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    assert client.node_exists("VHS_LoadVideo") is True
+    assert client.node_exists("MissingNode") is False
+    # 声明输入：required + optional（+ 扁平/hidden 形态）
+    assert client.declared_inputs("VHS_LoadVideo") == {"video", "force_rate", "format"}
+    # 过滤：未声明键被剔除；定义未知的节点原样保留（由 submit 400 兜底）
+    workflow = {
+        "a": {"class_type": "VHS_LoadVideo",
+              "inputs": {"video": "a.webm", "legacy_widget": 1}},
+        "b": {"class_type": "MissingNode", "inputs": {"x": 1}},
+    }
+    filtered = client.filter_workflow_inputs(workflow)
+    assert filtered["a"]["inputs"] == {"video": "a.webm"}
+    assert filtered["b"]["inputs"] == {"x": 1}
+    # 不修改调用方的工作流
+    assert workflow["a"]["inputs"] == {"video": "a.webm", "legacy_widget": 1}

@@ -18,14 +18,14 @@
 
 以 ComfyUI 安装目录为根（如 `D:\ComfyUI_windows_portable\ComfyUI\`）：
 
-| # | 文件名（必须一字不差） | 大小 | 放到 | 用途 | `.env` 对应变量（默认值=文件名，不改即可） |
-|---|---|---|---|---|---|
-| 1 | `sd_xl_base_1.0.safetensors` | ~6.9GB | `models/checkpoints/` | 分镜首帧文生图 + 角色定妆照 | `COMFYUI_T2I_CHECKPOINT` |
-| 2 | `ltx-video-2b-v0.9.5.safetensors` | ~2.0GB | `models/checkpoints/` | 首帧转视频片段 | `COMFYUI_LTX_CHECKPOINT` |
-| 3 | `t5xxl_fp8_e4m3fn.safetensors` | ~4.9GB | `models/text_encoders/` | 视频阶段的文字编码器（必须 fp8 版，fp16 版会 OOM） | `COMFYUI_T5` |
-| 4（可选） | `ip-adapter-plus-face_sdxl_vit-h.safetensors` | ~0.5GB | `models/ipadapter/` | 角色一致性：参考注入适配器 | 无需配置（节点按预设名自动加载） |
-| 5（可选） | `CLIP-ViT-H-14-laion2B-s32B-b79K.safetensors` | ~2.5GB | `models/clip_vision/` | 角色一致性：参考图的图像编码器 | 无需配置 |
-| 6（可选） | `anime.safetensors` | ~48MB | `models/loras/` | 全片动漫风格（文生图 LoRA，各档位推荐见 §九与 `.env.<档位>`） | `COMFYUI_T2I_LORA` |
+| #         | 文件名（必须一字不差）                        | 大小   | 放到                    | 用途                                                          | `.env` 对应变量（默认值=文件名，不改即可） |
+| --------- | --------------------------------------------- | ------ | ----------------------- | ------------------------------------------------------------- | ------------------------------------------ |
+| 1         | `sd_xl_base_1.0.safetensors`                  | ~6.9GB | `models/checkpoints/`   | 分镜首帧文生图 + 角色定妆照                                   | `COMFYUI_T2I_CHECKPOINT`                   |
+| 2         | `ltx-video-2b-v0.9.5.safetensors`             | ~2.0GB | `models/checkpoints/`   | 首帧转视频片段                                                | `COMFYUI_LTX_CHECKPOINT`                   |
+| 3         | `t5xxl_fp8_e4m3fn.safetensors`                | ~4.9GB | `models/text_encoders/` | 视频阶段的文字编码器（必须 fp8 版，fp16 版会 OOM）            | `COMFYUI_T5`                               |
+| 4（可选） | `ip-adapter-plus-face_sdxl_vit-h.safetensors` | ~0.5GB | `models/ipadapter/`     | 角色一致性：参考注入适配器                                    | 无需配置（节点按预设名自动加载）           |
+| 5（可选） | `CLIP-ViT-H-14-laion2B-s32B-b79K.safetensors` | ~2.5GB | `models/clip_vision/`   | 角色一致性：参考图的图像编码器                                | 无需配置                                   |
+| 6（可选） | `anime.safetensors`                           | ~48MB  | `models/loras/`         | 全片动漫风格（文生图 LoRA，各档位推荐见 §九与 `.env.<档位>`） | `COMFYUI_T2I_LORA`                         |
 
 前 3 个必装（约 13.8GB）；4、5 只在想开启角色一致性时才装（约 3GB）；
 6 只在固定动漫风格时才装（48MB，文件缺失会自动降级为纯提示词风格约束）。
@@ -40,31 +40,31 @@
 
 代码在 `comfyui_client.py` 的 `build_t2i_workflow`，生成的节点链：
 
-| 节点 | 作用 | 需要你配置什么 |
-|---|---|---|
-| CheckpointLoaderSimple | 加载 SDXL 主模型 | **文件 #1** 放对位置即可 |
-| LoraLoader（配置了 LoRA 时出现） | 叠加风格 LoRA（权重读 `COMFYUI_T2I_LORA_STRENGTH`） | **文件 #6** 放对位置即可（缺失自动降级为不挂） |
-| CLIPTextEncode（正/负） | 提示词 → 文本向量（风格词由 `PROMPT2VID_STYLE` 自动追加） | 无（用 SDXL 自带的 CLIP） |
-| EmptyLatentImage | 768×1344 竖屏空白画布 | 无 |
-| KSampler | 采样出图（25 步，代码传参） | 无 |
-| VAEDecode → SaveImage | 解码、保存 PNG | 无 |
-| LoadImage（仅角色一致性开启时出现） | 载入角色定妆照 | 无（定妆照由代码自动上传，不用你管） |
-| IPAdapterUnifiedLoader（同上） | 按预设 `PLUS FACE (portraits)` 自动加载适配器 | **文件 #4、#5** 放对位置即可 |
-| IPAdapter（同上） | 把定妆照特征注入采样（权重 0.8，代码传参） | 无 |
+| 节点                                | 作用                                                      | 需要你配置什么                                 |
+| ----------------------------------- | --------------------------------------------------------- | ---------------------------------------------- |
+| CheckpointLoaderSimple              | 加载 SDXL 主模型                                          | **文件 #1** 放对位置即可                       |
+| LoraLoader（配置了 LoRA 时出现）    | 叠加风格 LoRA（权重读 `COMFYUI_T2I_LORA_STRENGTH`）       | **文件 #6** 放对位置即可（缺失自动降级为不挂） |
+| CLIPTextEncode（正/负）             | 提示词 → 文本向量（风格词由 `PROMPT2VID_STYLE` 自动追加） | 无（用 SDXL 自带的 CLIP）                      |
+| EmptyLatentImage                    | 768×1344 竖屏空白画布                                     | 无                                             |
+| KSampler                            | 采样出图（25 步，代码传参）                               | 无                                             |
+| VAEDecode → SaveImage               | 解码、保存 PNG                                            | 无                                             |
+| LoadImage（仅角色一致性开启时出现） | 载入角色定妆照                                            | 无（定妆照由代码自动上传，不用你管）           |
+| IPAdapterUnifiedLoader（同上）      | 按预设 `PLUS FACE (portraits)` 自动加载适配器             | **文件 #4、#5** 放对位置即可                   |
+| IPAdapter（同上）                   | 把定妆照特征注入采样（权重 0.8，代码传参）                | 无                                             |
 
 ## 三、工作流② 图生视频——节点与模型对照
 
 代码在 `build_i2v_workflow`，节点链对照 ComfyUI 官方 LTX 模板：
 
-| 节点 | 作用 | 需要你配置什么 |
-|---|---|---|
-| CheckpointLoaderSimple | 加载 LTX-Video 主模型（自带 VAE，无需单独下载） | **文件 #2** |
-| LoraLoaderModelOnly（配置 `COMFYUI_LTX_LORA` 时出现） | 视频侧风格 LoRA（只接 MODEL，LTX 无 CLIP） | 13B 档推荐新海诚 LoRA（见 §7.2），2B 档留空 |
-| CLIPLoader | 加载 T5 文本编码器（`type=ltxv`、`device=cpu` 由代码传，省显存） | **文件 #3** |
-| CLIPTextEncode（正/负） | 运动/画面提示词编码（风格词由 `PROMPT2VID_STYLE` 自动追加） | 无 |
-| LoadImage → LTXVPreprocess | 载入首帧图 | 无（自动上传） |
-| LTXVImgToVideo / LTXVConditioning / LTXVScheduler / KSamplerSelect / SamplerCustom | LTX 采样管线（帧数、步数全由代码传参） | 无，但**要求 ComfyUI 是 2024-11 之后的版本**（自带这些 LTXV 节点） |
-| VAEDecode → SaveWEBM | 输出 webm 片段 | 无 |
+| 节点                                                                               | 作用                                                             | 需要你配置什么                                                     |
+| ---------------------------------------------------------------------------------- | ---------------------------------------------------------------- | ------------------------------------------------------------------ |
+| CheckpointLoaderSimple                                                             | 加载 LTX-Video 主模型（自带 VAE，无需单独下载）                  | **文件 #2**                                                        |
+| LoraLoaderModelOnly（配置 `COMFYUI_LTX_LORA` 时出现）                              | 视频侧风格 LoRA（只接 MODEL，LTX 无 CLIP）                       | 13B 档推荐新海诚 LoRA（见 §7.2），2B 档留空                        |
+| CLIPLoader                                                                         | 加载 T5 文本编码器（`type=ltxv`、`device=cpu` 由代码传，省显存） | **文件 #3**                                                        |
+| CLIPTextEncode（正/负）                                                            | 运动/画面提示词编码（风格词由 `PROMPT2VID_STYLE` 自动追加）      | 无                                                                 |
+| LoadImage → LTXVPreprocess                                                         | 载入首帧图                                                       | 无（自动上传）                                                     |
+| LTXVImgToVideo / LTXVConditioning / LTXVScheduler / KSamplerSelect / SamplerCustom | LTX 采样管线（帧数、步数全由代码传参）                           | 无，但**要求 ComfyUI 是 2024-11 之后的版本**（自带这些 LTXV 节点） |
+| VAEDecode → SaveWEBM                                                               | 输出 webm 片段                                                   | 无                                                                 |
 
 ## 四、自定义节点（唯一需要"安装"的东西，且可选）
 
@@ -95,15 +95,15 @@ git clone https://github.com/cubiq/ComfyUI_IPAdapter_plus.git
 
 ## 六、出错时对照表
 
-| 症状 | 原因 |
-|---|---|
-| 预检 NG「T2I/LTX checkpoint」 | 文件 #1/#2 没放 `models/checkpoints/`，或文件名与 `.env` 不一致 |
-| 预检 NG「T5 文本编码器」 | 文件 #3 没放 `models/text_encoders/`，或下了 fp16 版（文件名不同） |
-| 预检 NG「LTXV 节点」 | ComfyUI 版本太旧，升级 |
-| 预检 NG「ComfyUI 可达」 | ComfyUI 没启动，或端口/`COMFYUI_URL` 不对 |
-| 预检 NG「T2I/LTX LoRA」（不拦截运行） | LoRA 没放 `models/loras/` 或文件名不一致；运行时会自动降级为无 LoRA，只靠提示词风格约束 |
-| clips 阶段整批失败且挂了 LTX LoRA | LoRA 与 LTX 底模版本不匹配（如在 distilled fp8 上用了 dev 版 LoRA）：清空 `COMFYUI_LTX_LORA` 或换底模 |
-| run.log 出现「角色 … 定妆照生成/上传失败…回退」 | IPAdapter 节点或模型 #4/#5 未就位（不影响出片，只是没有参考） |
+| 症状                                            | 原因                                                                                                  |
+| ----------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
+| 预检 NG「T2I/LTX checkpoint」                   | 文件 #1/#2 没放 `models/checkpoints/`，或文件名与 `.env` 不一致                                       |
+| 预检 NG「T5 文本编码器」                        | 文件 #3 没放 `models/text_encoders/`，或下了 fp16 版（文件名不同）                                    |
+| 预检 NG「LTXV 节点」                            | ComfyUI 版本太旧，升级                                                                                |
+| 预检 NG「ComfyUI 可达」                         | ComfyUI 没启动，或端口/`COMFYUI_URL` 不对                                                             |
+| 预检 NG「T2I/LTX LoRA」（不拦截运行）           | LoRA 没放 `models/loras/` 或文件名不一致；运行时会自动降级为无 LoRA，只靠提示词风格约束               |
+| clips 阶段整批失败且挂了 LTX LoRA               | LoRA 与 LTX 底模版本不匹配（如在 distilled fp8 上用了 dev 版 LoRA）：清空 `COMFYUI_LTX_LORA` 或换底模 |
+| run.log 出现「角色 … 定妆照生成/上传失败…回退」 | IPAdapter 节点或模型 #4/#5 未就位（不影响出片，只是没有参考）                                         |
 
 ## 七、5090 / 4090 高质量档：模型下载清单（第 2 档升级）
 
@@ -130,15 +130,15 @@ mkdir -p "$MODELS"/{checkpoints,text_encoders,ipadapter,clip_vision,loras}
 
 ### 7.2 模型清单（7 个文件，新增约 26.9GB）
 
-| # | 用途 | 文件（已核实） | 大小 |
-|---|---|---|---|
-| ① | 首帧文生图（写实系升级） | `RealVisXL_V5.0_fp16.safetensors` | 6.94GB |
-| ② | 图生视频（13B 升级） | `ltxv-13b-0.9.7-distilled-fp8.safetensors` | 15.7GB |
-| ③ | 角色一致性 adapter | `ip-adapter-plus-face_sdxl_vit-h.safetensors` | 848MB |
-| ④ | 角色一致性编码器 | `model.safetensors`（**下载后必须重命名**） | 2.53GB |
-| ⑤ | 视频文本编码 | `t5xxl_fp8_e4m3fn.safetensors`（标准档已有则跳过） | 4.9GB |
-| ⑥ | 文生图动漫风格 LoRA | `anime.safetensors` | 48MB |
-| ⑦ | 视频动漫风格 LoRA（13B） | `shinkai-anime-style-lora-v1_58000.safetensors` | 812MB |
+| #   | 用途                     | 文件（已核实）                                     | 大小   |
+| --- | ------------------------ | -------------------------------------------------- | ------ |
+| ①   | 首帧文生图（写实系升级） | `RealVisXL_V5.0_fp16.safetensors`                  | 6.94GB |
+| ②   | 图生视频（13B 升级）     | `ltxv-13b-0.9.7-distilled-fp8.safetensors`         | 15.7GB |
+| ③   | 角色一致性 adapter       | `ip-adapter-plus-face_sdxl_vit-h.safetensors`      | 848MB  |
+| ④   | 角色一致性编码器         | `model.safetensors`（**下载后必须重命名**）        | 2.53GB |
+| ⑤   | 视频文本编码             | `t5xxl_fp8_e4m3fn.safetensors`（标准档已有则跳过） | 4.9GB  |
+| ⑥   | 文生图动漫风格 LoRA      | `anime.safetensors`                                | 48MB   |
+| ⑦   | 视频动漫风格 LoRA（13B） | `shinkai-anime-style-lora-v1_58000.safetensors`    | 812MB  |
 
 > ⑥⑦ 两个 LoRA 按**显卡档位**的下载速查（含 4060 本地档）见 §九。
 
@@ -378,15 +378,15 @@ prompt2vid --check-only
 
 ### 8.10 常见问题
 
-| 症状 | 原因与处理 |
-|---|---|
-| ComfyUI 启动即 `no kernel image is available` | torch 是 cu124 及更早——回 8.5 第 2 步装 cu128 版 |
-| 无卡模式下 `nvidia-smi` 报错 | 正常，无卡模式本来就没有 GPU；装环境不受影响 |
-| `git clone` GitHub 超时 | 先 `source /etc/network_turbo`；仍不行用镜像 `git clone https://ghproxy.net/https://github.com/...` |
-| 本地打不开 127.0.0.1:8188 | 隧道没建或断了：重跑 8.8 的 ssh -N 命令；确认云机 ComfyUI 进程活着（`tail comfyui.log`） |
-| `--check-only` 报模型不存在 | 模型没下全或目录放错——对照 §一 总表 / §7.4 验证输出 |
-| SaveWEBM 节点报错 | 没装 `pip install av`（8.5 第 4 步） |
-| 断开 SSH 后 ComfyUI 停了 | 没用 nohup/tmux——按 8.7 第 4 步的命令启动 |
+| 症状                                          | 原因与处理                                                                                          |
+| --------------------------------------------- | --------------------------------------------------------------------------------------------------- |
+| ComfyUI 启动即 `no kernel image is available` | torch 是 cu124 及更早——回 8.5 第 2 步装 cu128 版                                                    |
+| 无卡模式下 `nvidia-smi` 报错                  | 正常，无卡模式本来就没有 GPU；装环境不受影响                                                        |
+| `git clone` GitHub 超时                       | 先 `source /etc/network_turbo`；仍不行用镜像 `git clone https://ghproxy.net/https://github.com/...` |
+| 本地打不开 127.0.0.1:8188                     | 隧道没建或断了：重跑 8.8 的 ssh -N 命令；确认云机 ComfyUI 进程活着（`tail comfyui.log`）            |
+| `--check-only` 报模型不存在                   | 模型没下全或目录放错——对照 §一 总表 / §7.4 验证输出                                                 |
+| SaveWEBM 节点报错                             | 没装 `pip install av`（8.5 第 4 步）                                                                |
+| 断开 SSH 后 ComfyUI 停了                      | 没用 nohup/tmux——按 8.7 第 4 步的命令启动                                                           |
 
 ### 8.11 seetacloud 实例（SSH 隧道）专用配置
 
@@ -492,18 +492,18 @@ prompt2vid --check-only
 
 ### 9.1 按档位的下载清单
 
-| 档位（配置文件） | 底部模型 | 文生图 LoRA（必下） | 视频侧 LoRA | 合计下载 |
-|---|---|---|---|---|
-| **4060 本地档**（`.env.4060`，8GB） | SDXL Base + LTX 2B | `anime.safetensors`（48MB） | 无——LTX 2B 没有现成动漫 LoRA，视频风格由动漫首帧 + 提示词约束传递 | 1 个文件，约 48MB |
-| **4090 高质量档**（`.env.4090`，24GB） | RealVisXL + LTX 13B | `anime.safetensors`（48MB） | `shinkai-anime-style-lora-v1_58000.safetensors`（812MB） | 2 个文件，约 860MB |
-| **5090 最高档**（`.env.5090`，32GB） | 同 4090 | `anime.safetensors`（48MB） | `shinkai-anime-style-lora-v1_58000.safetensors`（812MB） | 2 个文件，约 860MB |
+| 档位（配置文件）                       | 底部模型            | 文生图 LoRA（必下）         | 视频侧 LoRA                                                       | 合计下载           |
+| -------------------------------------- | ------------------- | --------------------------- | ----------------------------------------------------------------- | ------------------ |
+| **4060 本地档**（`.env.4060`，8GB）    | SDXL Base + LTX 2B  | `anime.safetensors`（48MB） | 无——LTX 2B 没有现成动漫 LoRA，视频风格由动漫首帧 + 提示词约束传递 | 1 个文件，约 48MB  |
+| **4090 高质量档**（`.env.4090`，24GB） | RealVisXL + LTX 13B | `anime.safetensors`（48MB） | `shinkai-anime-style-lora-v1_58000.safetensors`（812MB）          | 2 个文件，约 860MB |
+| **5090 最高档**（`.env.5090`，32GB）   | 同 4090             | `anime.safetensors`（48MB） | `shinkai-anime-style-lora-v1_58000.safetensors`（812MB）          | 2 个文件，约 860MB |
 
 涉及的 2 个文件（HF 仓库与文件名均已对照 hf-mirror 核实）：
 
-| 文件名（必须一字不差） | HF 仓库 | 放置路径 | 说明 |
-|---|---|---|---|
-| `anime.safetensors` | `ntc-ai/SDXL-LoRA-slider.anime` | `models/loras/` | SDXL Base 1.0 上训练的动漫概念滑块，三档通用（8GB 显存也无压力） |
-| `shinkai-anime-style-lora-v1_58000.safetensors` | `Cseti/ltxv-13b-shinkai-anime-style-lora-v1` | `models/loras/` | LTX-Video 13B 新海诚动漫风格；触发词 `sh1nka1 style` |
+| 文件名（必须一字不差）                          | HF 仓库                                      | 放置路径        | 说明                                                             |
+| ----------------------------------------------- | -------------------------------------------- | --------------- | ---------------------------------------------------------------- |
+| `anime.safetensors`                             | `ntc-ai/SDXL-LoRA-slider.anime`              | `models/loras/` | SDXL Base 1.0 上训练的动漫概念滑块，三档通用（8GB 显存也无压力） |
+| `shinkai-anime-style-lora-v1_58000.safetensors` | `Cseti/ltxv-13b-shinkai-anime-style-lora-v1` | `models/loras/` | LTX-Video 13B 新海诚动漫风格；触发词 `sh1nka1 style`             |
 
 ### 9.2 本地 4060（PowerShell）
 
@@ -574,17 +574,26 @@ COMFYUI_LTX_LORA_STRENGTH=0.8     # 5090 档已设 0.9（显存富余可再调�
 LoRA +（可选）clone 一个节点包 + 启动**，其余由项目代码通过 API 完成；
 `prompt2vid --check-only` 是验证配置是否正确的唯一入口。
 
-
-
 hf download stabilityai/stable-diffusion-xl-base-1.0 sd_xl_base_1.0.safetensors
-  --local-dir "$MODELS/checkpoints"
+--local-dir "$MODELS/checkpoints"
 
 hf download Lightricks/LTX-Video ltx-video-2b-v0.9.5.safetensors
-  --local-dir "$MODELS/checkpoints"
+--local-dir "$MODELS/checkpoints"
 
 hf download comfyanonymous/flux_text_encoders t5xxl_fp8_e4m3fn.safetensors
-  --local-dir "$MODELS/text_encoders"
-
-
+--local-dir "$MODELS/text_encoders"
 
 ssh -p 44264 root@connect.westd.seetacloud.com
+
+prompt2vid "一只戴着安全帽、叼着施工图纸的哈士奇，站在沈阳街头，前爪握着一支巨大的毛笔，像指挥家一样大笔一挥，面前原本平整崭新的柏油马路瞬间被画成一块一块的方块补丁。道路看起来像刚出土的兵马俑坑，东一块、西一块，深浅不一，仿佛城市地下藏着一支等待修复的陶土军团。哈士奇眼神无辜又认真，尾巴摇得像施工警示灯，身后还拖着几块“前方施工”“请绕行”“刚修好，别 踩”的铁皮牌子。
+画面风格为夸张搞笑卡通插画，色彩明亮，带一点尘土飞扬的怀旧感。背景是沈阳的城市街景：老式居民楼、地铁围挡、共享单车、公交站牌，远处隐约可见故宫角楼和中街商圈。天空灰蒙蒙却不压抑，反而像一首老歌的前奏。
+配文风格参考《沈阳啊沈阳，我的故乡》：“沈阳啊沈阳，我的故乡，马路上尘土飞扬；刚铺好的路 ，转眼又开膛，哈士奇挥笔补补丁忙。”整体氛围既吐槽又亲切，把“年年修、年年挖、年年补”的城 市日常，变成一只哈士奇用毛笔给马路打补丁的荒诞喜剧。" --env-file 4090
+
+cd "<ComfyUI目录>\custom_nodes"
+git clone https://github.com/chenpipi0807/ComfyUI-Index-TTS.git
+pip install -r ComfyUI-Index-TTS\requirements.txt
+python ComfyUI-Index-TTS\TTS2_5_download.py # 模型约 8-10GB，支持 hf-mirror
+
+git clone https://github.com/ShmuelRonen/ComfyUI-LatentSyncWrapper.git
+pip install -r ComfyUI-LatentSyncWrapper\requirements.txt # 首次运行自动下模型（约 7GB）
+git clone https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite.git # 如未装

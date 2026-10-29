@@ -41,6 +41,10 @@ LTXV 节点是否齐备，并对每个 NG 项给出修复提示。本文就是�
 > **关键约束 2**：LTX 帧数必须是 **8n+1**（9/17/…/121），且 8GB 显存下建议
 > 单镜 ≤121 帧（约 4.8s @25fps）。本项目代码已自动按时长换算并强制这两个约束，
 > 无需手工干预（`COMFYUI_LTX_MAX_FRAMES` 可调）。
+>
+> **可选增强的显存门槛**：配音升级 IndexTTS-2.5 约 12GB（§7），口型同步
+> LatentSync 约 20GB（§8）——8GB 档两者都建议关闭（配音走回退链、
+> `PROMPT2VID_LIPSYNC=off`）；24GB+（4090/5090 档）两者都开。
 
 ---
 
@@ -284,10 +288,17 @@ PROMPT2VID_SUBTITLE_STYLE=FontName=Microsoft YaHei,FontSize=18,Outline=1,MarginV
 - `COMFYUI_T2I_STEPS`：SDXL 默认 25 步（dpmpp_2m）；
 - `COMFYUI_T2I_WIDTH` / `COMFYUI_T2I_HEIGHT`：首帧画幅，默认 768x1344；
   视频画幅会自动跟随首帧宽高比并取 32 的倍数，避免人物被裁变形；
+- `PROMPT2VID_UPSCALE=720`：成片 lanczos 放大到 720 宽（`.env` 已默认
+  开启）——8GB 档 LTX 只能生成约 480x832，渲染阶段补到 720 宽；
+- `PROMPT2VID_SMOOTH_FPS=50`：可选 CPU 补帧，运镜更顺滑（快速运动
+  可能形变，默认关闭）；
 - `PROMPT2VID_SEED=42`：固定种子跑对比实验（逐镜自动 +1）；
 - `PROMPT2VID_DIRECT_MEDIA=true` 或 CLI `--direct-media`：LLM 只做创意
   三阶段 + 发布，媒体阶段由代码直跑，每次 run 省 6 次 LLM 往返；
 - `PROMPT2VID_BGM=<音频文件>`：可选背景音乐（循环低音量混入）。
+
+> 更多画质杠杆（转码 CRF 分层、超分、RIFE、换底模）与对症速查见
+> [QUALITY.md](QUALITY.md)。
 
 ### 5.4 ComfyUI 版本要求
 
@@ -369,7 +380,116 @@ COMFYUI_IPADAPTER=true
 
 ---
 
-## 7. 可选模型替换（非必需）
+## 7. 配音升级（可选：IndexTTS-2.5 本地高音质配音）
+
+> 作用：把配音从 edge-tts（微软公网语音）升级为 **IndexTTS-2.5**（B 站
+> 开源，中文自然度第一梯队）：自带 59 个音色（甜美女声/新闻女声/说书人/
+> 御姐配音/温润男声/播音中年男…），也支持用一段 3-15 秒的录音**克隆你
+> 自己的声音**；句间自动停顿让旁白有自然换气感。约需 **12GB 显存**。
+>
+> 未安装时配音自动走回退链（edge-tts → OpenAI 网关 → piper → 静音），
+> 每次降级 `run.log` 都有 warning——不再静默换音色。
+
+### 7.1 安装自定义节点与模型
+
+```powershell
+cd "<ComfyUI目录>\custom_nodes"
+git clone https://github.com/chenpipi0807/ComfyUI-Index-TTS.git
+
+# 安装依赖（便携版用 python_embeded 的 pip）
+pip install -r ComfyUI-Index-TTS\requirements.txt
+
+# 下载 IndexTTS-2.5 模型（约 8-10GB → models/IndexTTS-2.5/，脚本内置 hf-mirror 支持）
+python ComfyUI-Index-TTS\TTS2_5_download.py
+
+# 重启 ComfyUI
+```
+
+### 7.2 配置与验证
+
+`.env` 无需改动（默认 `PROMPT2VID_TTS_ENGINE=auto`：探测到节点即用）。
+想换音色或克隆自定义声音：
+
+```ini
+# 插件自带音色（TimbreModel 目录里的文件名，完整列表见该目录）
+PROMPT2VID_TTS_TIMBRE=新闻女声.WAV
+# 或者：克隆自己的声音（3-15 秒干净人声，wav/mp3 均可，优先于上面）
+PROMPT2VID_TTS_REF_AUDIO=D:\voices\my_voice.wav
+# 语速（>1 变慢）/ 句间停顿 / 模型留显存（默认开，整批逐镜免重载）
+PROMPT2VID_TTS_SPEED=1.0
+PROMPT2VID_TTS_SILENCE_MS=200
+PROMPT2VID_TTS_KEEP_CACHED=true
+```
+
+验证：`prompt2vid --check-only` 应出现 `配音（IndexTTS-2.5）: OK`；
+正式跑一次后听 `audio/shot_*.mp3`，`run.log` 无降级告警。
+
+> **容错**：节点未安装/服务未启动 → 预检与 run.log 告警一次，配音走
+> 回退链，流水线不中断。
+>
+> **显存**：推理峰值约 12GB；8GB 卡放不下（4060 档请继续用回退链），
+> 24GB+ 无压力。`PROMPT2VID_TTS_KEEP_CACHED=false` 可让模型每次推理后
+> 卸载，与其它阶段错峰用显存（代价是逐镜重载，变慢）。
+
+---
+
+## 8. 口型同步（可选：LatentSync 唇形驱动）
+
+> 作用：新增的媒体阶段（配音与剪辑之间）把每镜片段与配音上传 ComfyUI，
+> **LatentSync 1.6**（字节跳动）对人物嘴部做音频驱动重绘——人物"嘴动"
+> 与旁白对上。配音比片段长时自动往返补帧延长（旁白零截断），渲染阶段
+> 优先使用口型同步产物。约需 **20GB 显存**（4090/24GB 档可用，8-12GB
+> 卡请在 `.env` 保持 `PROMPT2VID_LIPSYNC=off`）。
+>
+> ⚠ **只处理真人正脸**：动漫脸（`PROMPT2VID_STYLE=anime`）/ 侧脸 / 远景
+> 小脸 / 无人脸镜头会失败——单镜失败自动保留原片段并在
+> `lipsync/manifest.json` 记录，流水线不中断。想要口型生效，请用
+> `realistic` 风格且分镜画面包含清晰人物面部。
+
+### 8.1 安装自定义节点
+
+```powershell
+cd "<ComfyUI目录>\custom_nodes"
+
+# LatentSync 包装节点
+git clone https://github.com/ShmuelRonen/ComfyUI-LatentSyncWrapper.git
+pip install -r ComfyUI-LatentSyncWrapper\requirements.txt
+
+# 视频加载/合成（很多环境已装；没有就补）
+git clone https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite.git
+pip install -r ComfyUI-VideoHelperSuite\requirements.txt
+
+# 重启 ComfyUI；首次运行时 LatentSync 模型（约 7GB）会自动从
+# HuggingFace ByteDance/LatentSync-1.6 下载（国内先设 HF_ENDPOINT 镜像），
+# 也可用该仓库 README 提供的 Google Drive 预配置整包
+```
+
+### 8.2 配置与验证
+
+`.env.4090` / `.env.5090` 默认已开启（`PROMPT2VID_LIPSYNC=auto`：节点
+齐全才跑）。可调项：
+
+```ini
+PROMPT2VID_LIPSYNC=auto        # auto（默认）/ on（缺节点报错）/ off
+PROMPT2VID_LIPSYNC_EXPRESSION=1.5   # 唇形表现力：1.0-1.5 自然，2.0-3.0 夸张
+PROMPT2VID_LIPSYNC_STEPS=20    # 推理步数：20 够用，30-50 更慢更稳
+PROMPT2VID_LIPSYNC_CRF=19      # 产物 mp4 质量（越小越清晰）
+```
+
+验证：`prompt2vid --check-only` 应出现 `口型同步（LatentSync）: OK`；
+正式跑一次后 `lipsync/` 目录出现 `shot_*.mp4`，成片人物说话时嘴部与
+配音对齐（`render_report.json` 的 `lipsync.shots` 记录生效镜头数）。
+
+> **容错**：auto 模式缺节点 → 预检提示、渲染直接用原片段；单镜无人脸
+> 失败 → 该镜保留原片段，其余镜头照常。
+>
+> **显存**：推理峰值约 20GB；与 LTX/SDXL 缓存共存时 ComfyUI 会自动
+> 换页，若 OOM 可重启 ComfyUI 后单独重跑 `sync_lips` 步骤
+> （`prompt2vid --resume output/run_xxx --only sync_lips`）。
+
+---
+
+## 9. 可选模型替换（非必需）
 
 保持默认即可跑通；想换只在** aesthetics / 风格**上做文章时参考（换后需同步改
 `.env` 对应变量为实际文件名）：
@@ -385,7 +505,7 @@ COMFYUI_IPADAPTER=true
 
 ---
 
-## 8. 全部就绪后：一键跑通
+## 10. 全部就绪后：一键跑通
 
 ```powershell
 # 1. 终检（应全绿）
@@ -406,9 +526,9 @@ prompt2vid --clean --keep 5
 
 每次运行的排障日志在 `output/run_<时间戳>/run.log`（各阶段开始/结束、
 耗时、失败原因）。产物在 `output/run_<时间戳>/`：`frames/`（分镜首帧）→
-`clips/`（分镜视频）→ `audio/`（配音）→ `final/final.mp4`（成片 + 字幕）→
-`report/quality_report.json`（质检报告）→ `.douyin/state.json`（dry-run
-发布记录）。
+`clips/`（分镜视频）→ `audio/`（配音）→ `lipsync/`（口型同步片段，装好
+节点时）→ `final/final.mp4`（成片 + 字幕）→ `report/quality_report.json`
+（质检报告）→ `.douyin/state.json`（dry-run 发布记录）。
 
 ### 常见问题速查
 
@@ -419,7 +539,9 @@ prompt2vid --clean --keep 5
 | 预检报 LTXV 节点缺失 | ComfyUI 版本过旧，升级到 master |
 | 文生图 CUDA OOM | 启动参数加 `--lowvram`（§5.3）；确认 T5 在 CPU（`.env` `COMFYUI_T5_DEVICE=cpu`） |
 | 下载超时/中断 | 确认 `$env:HF_ENDPOINT` 已设；重跑同一命令自动续传；或改用 §3.5 直链 |
-| 配音无声 | edge-tts 被代理拦截 → 配 `PROMPT2VID_TTS_BASE_URL`，或接受静音占位（流水线不中断） |
+| 配音无声/音色不对 | `run.log` 里的降级告警会说明实际用了哪个引擎：装 IndexTTS 节点（§7）、配 `PROMPT2VID_TTS_BASE_URL`、或设 `EDGE_TTS_PROXY` 走代理 |
+| 口型同步整段被跳过 | 预检/日志提示缺节点 → 装 LatentSyncWrapper + VideoHelperSuite（§8）；或 `.env` 设 `PROMPT2VID_LIPSYNC=off` 明确关闭 |
+| 个别镜头没有口型 | 该镜无真人正脸（动漫脸/远景/侧脸），LatentSync 无法处理 → 已自动保留原片段（`lipsync/manifest.json` 有记录），属预期行为 |
 | LLM 调用失败 | 模型名加 `openai/` 前缀；确认网关地址与 key；内网网关已被自动加入 NO_PROXY |
 
 ---

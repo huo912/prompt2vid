@@ -11,13 +11,21 @@ CLI：prompt2vid "描述" 默认自动预检；也可 `prompt2vid --check-only`
 3. T2I checkpoint（CheckpointLoaderSimple 的 ckpt_name 候选中）；
 4. LTX checkpoint（同上）；
 5. T5 文本编码器（CLIPLoader 的 clip_name 候选中）；
-6. LTXV 节点存在（ComfyUI 版本不能太旧）。
+6. LTXV 节点存在（ComfyUI 版本不能太旧）；
+7. GPU 显存与画质档位校对（system_stats 的 CUDA 设备；13B/720p
+   预算超出显存、IPAdapter 在 8GB 卡上开启时警告——全部非阻断）；
+8. 配音可用性（ComfyUI IndexTTS-2.5 / 网关 / piper 离线 / edge-tts
+   至少一条路，非阻断）；
+9. 口型同步节点（LatentSync + VideoHelperSuite；auto 模式缺节点只
+   提示跳过，on 模式缺节点为阻断性配置错误）。
 """
 
 from __future__ import annotations
 
+import os
 import shutil
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -29,11 +37,16 @@ from .comfyui_client import (
     DEFAULT_T5,
     combo_values,
     env_str,
+    ipadapter_enabled,
+    ltx_max_pixels,
 )
 from .ffmpeg_ops import resolve_tool
 from .style import style_enabled, style_name
 
 POLL_TIMEOUT = 8.0
+
+# edge-tts 连通性探测结果缓存（None = 未探测；进程内只探一次）
+_EDGE_TTS_OK: bool | None = None
 
 
 @dataclass
@@ -85,6 +98,185 @@ def _fetch_node_info(client: httpx.Client, node: str, base_url: str) -> dict[str
     return resp.json()
 
 
+def _append_gpu_checks(
+    checks: list[Check], system_stats: dict[str, Any], ltx_ckpt: str
+) -> None:
+    """GPU 显存与画质档位校对（全部非阻断：只提示，不拦截）。
+
+    显存决定 LTX 模型与分辨率预算：配置超出显卡能力会在生成阶段 OOM，
+    配置低于显卡能力则浪费画质。显存阈值按本项目三档（8/24/32GB）划分。
+    """
+    devices = system_stats.get("devices") or [] if isinstance(system_stats, dict) else []
+    gpu = next((d for d in devices if isinstance(d, dict) and d.get("type") == "cuda"), None)
+    if gpu is None:
+        return  # 旧版 ComfyUI / 无 CUDA：不臆测
+    vram_gb = float(gpu.get("vram_total") or 0) / 2**30
+    name = str(gpu.get("name") or "CUDA 设备")
+    checks.append(
+        Check(
+            name=f"GPU 显存（{name}）",
+            ok=True,
+            detail=f"{vram_gb:.0f}GB",
+            required=False,
+        )
+    )
+    pixels = ltx_max_pixels(ltx_ckpt)
+    ltx_name = ltx_ckpt.lower()
+    if "13b" in ltx_name and vram_gb < 16:
+        checks.append(
+            Check(
+                name="档位校对：LTX 13B",
+                ok=False,
+                detail=f"{vram_gb:.0f}GB 显存放不下 13B fp8（权重约 15.7GB），生成阶段会 OOM",
+                hint="换回 2B：COMFYUI_LTX_CHECKPOINT=ltx-video-2b-v0.9.5.safetensors，"
+                     "并清空 COMFYUI_LTX_MAX_PIXELS（2B 默认 393216）",
+                required=False,
+            )
+        )
+    if pixels > 700_000 and vram_gb < 26:
+        checks.append(
+            Check(
+                name="档位校对：分辨率预算",
+                ok=False,
+                detail=f"COMFYUI_LTX_MAX_PIXELS={pixels}（720p 档）在 {vram_gb:.0f}GB 显存上偏激进，可能 OOM",
+                hint="24GB 档建议 589824（约 576x1024）；OOM 后回调即可",
+                required=False,
+            )
+        )
+    elif vram_gb >= 26 and pixels <= 600_000:
+        checks.append(
+            Check(
+                name="档位校对：分辨率预算",
+                ok=True,
+                detail=f"显存富余（{vram_gb:.0f}GB），可把 COMFYUI_LTX_MAX_PIXELS 提到 921600 上 720p（约 704x1248）",
+                required=False,
+            )
+        )
+    if ipadapter_enabled() and vram_gb < 10:
+        checks.append(
+            Check(
+                name="档位校对：IPAdapter",
+                ok=False,
+                detail=f"COMFYUI_IPADAPTER=true 但只有 {vram_gb:.0f}GB 显存（T2I 阶段需多加载约 3.4GB）",
+                hint="8GB 档建议关闭 IPAdapter，角色一致性靠分镜角色卡的文字契约",
+                required=False,
+            )
+        )
+
+
+def _append_tts_check(
+    checks: list[Check],
+    comfyui_url: str | None = None,
+    transport: httpx.BaseTransport | None = None,
+) -> None:
+    """配音可用性预检（非阻断）：IndexTTS / 网关 / piper / edge-tts。
+
+    优先报告 ComfyUI IndexTTS-2.5（主引擎，需自定义节点），再探测回退链。
+    全部不可用时只警告不拦截——静音占位保证流水线能跑完，但成片没旁白，
+    提前让用户知道比跑完 20 分钟才发现要好。
+    """
+    from . import tts as tts_mod
+    from .comfyui_client import DEFAULT_TTS_TIMBRE
+
+    engine = os.getenv("PROMPT2VID_TTS_ENGINE", "auto").strip().lower() or "auto"
+    ref_audio = tts_mod._ref_audio_path()
+    # ComfyUI IndexTTS-2.5（auto/comfyui 引擎时优先探测）
+    if comfyui_url and engine in ("auto", "comfyui"):
+        try:
+            with httpx.Client(timeout=POLL_TIMEOUT, transport=transport) as client:
+                tts_spec = _fetch_node_info(client, "IndexTTS25BaseNode", comfyui_url)
+                timbre_spec = _fetch_node_info(client, "TimbreAudioLoader", comfyui_url)
+        except Exception:  # noqa: BLE001 - object_info 异常按不可用处理
+            tts_spec = timbre_spec = {}
+        if tts_spec:
+            if ref_audio:
+                checks.append(Check(
+                    name="配音（IndexTTS-2.5）", ok=True,
+                    detail=f"ComfyUI 本地推理，克隆参考音频: {Path(ref_audio).name}",
+                    required=False,
+                ))
+                return
+            timbre = (
+                os.getenv("PROMPT2VID_TTS_TIMBRE", "").strip()
+                or DEFAULT_TTS_TIMBRE
+            )
+            available = _combo_values(timbre_spec.get("TimbreAudioLoader", {}), "audio_file")
+            if timbre in available:
+                checks.append(Check(
+                    name="配音（IndexTTS-2.5）", ok=True,
+                    detail=f"ComfyUI 本地推理，音色: {timbre}",
+                    required=False,
+                ))
+                return
+            if available:
+                checks.append(Check(
+                    name="配音（IndexTTS-2.5）", ok=False,
+                    detail=f"音色 {timbre} 不在插件自带音色列表里"
+                           f"（可选: {', '.join(available[:5])}… 共 {len(available)} 个）",
+                    hint="修改 PROMPT2VID_TTS_TIMBRE 为列表中的文件名，或设置 "
+                         "PROMPT2VID_TTS_REF_AUDIO 指向 3-15 秒干净人声克隆自定义音色",
+                    required=False,
+                ))
+                return
+        elif engine == "comfyui":
+            checks.append(Check(
+                name="配音（IndexTTS-2.5）", ok=False,
+                detail="显式指定 comfyui 引擎但 ComfyUI 缺少 IndexTTS 节点",
+                hint="安装 chenpipi0807/ComfyUI-Index-TTS 并运行 TTS2_5_download.py"
+                     " 下载模型（见 docs/LOCAL_SETUP.md）；本次运行将走回退链",
+                required=False,
+            ))
+
+    gateway = os.getenv("PROMPT2VID_TTS_BASE_URL", "").strip()
+    if gateway:
+        checks.append(Check(
+            name="配音（TTS 网关）", ok=True, detail=gateway, required=False,
+        ))
+        return
+    piper_model = tts_mod._piper_model()
+    if piper_model and shutil.which("piper"):
+        checks.append(Check(
+            name="配音（piper 离线）", ok=True,
+            detail=f"音色: {Path(piper_model).name}", required=False,
+        ))
+        return
+    # edge-tts 现场试连（公司网络常拦 WSS，握手 403 立刻失败）；
+    # 结果进程内缓存，避免预检被反复调用时重复等网络
+    global _EDGE_TTS_OK
+    if _EDGE_TTS_OK is None:
+        _EDGE_TTS_OK = False
+        try:
+            import asyncio
+            import tempfile
+
+            import edge_tts
+
+            with tempfile.TemporaryDirectory() as tmp:
+                probe = Path(tmp) / "probe.mp3"
+                asyncio.run(asyncio.wait_for(
+                    edge_tts.Communicate(text="测试", voice="zh-CN-XiaoxiaoNeural")
+                    .save(str(probe)),
+                    timeout=10.0,
+                ))
+                _EDGE_TTS_OK = probe.is_file() and probe.stat().st_size > 0
+        except Exception:  # noqa: BLE001 - 任何失败都归为不可用
+            pass
+    if _EDGE_TTS_OK:
+        checks.append(Check(
+            name="配音（edge-tts）", ok=True, detail="公网连通",
+            required=False,
+        ))
+        return
+    checks.append(Check(
+        name="配音（TTS）", ok=False,
+        detail="edge-tts / 网关 / piper 均不可用，本次运行的旁白将是静音占位",
+        hint="推荐离线方案：pip install piper-tts 并下载中文音色到 models/tts/"
+             "（命令见 docs/QUALITY.md §配音）；或配置 PROMPT2VID_TTS_BASE_URL；"
+             "或设 EDGE_TTS_PROXY 走代理",
+        required=False,
+    ))
+
+
 def check_environment(
     base_url: str | None = None,
     transport: httpx.BaseTransport | None = None,
@@ -111,13 +303,21 @@ def check_environment(
             )
         )
 
-    # 2. ComfyUI 可达性
+    # 2. ComfyUI 可达性（顺便取 system_stats，供 GPU 档位校对）
     comfyui_ok = False
+    system_stats: dict[str, Any] = {}
     try:
         with httpx.Client(timeout=POLL_TIMEOUT, transport=transport) as client:
             resp = client.get(f"{comfyui_url}/system_stats")
             comfyui_ok = resp.status_code == 200
             detail = resp.text[:80]
+            if comfyui_ok:
+                try:
+                    stats = resp.json()
+                except ValueError:
+                    stats = {}
+                if isinstance(stats, dict):
+                    system_stats = stats
     except Exception as exc:  # noqa: BLE001 - 任何网络错误都归为不可达
         detail = str(exc)
     checks.append(
@@ -134,6 +334,44 @@ def check_environment(
         t2i_ckpt = env_str("COMFYUI_T2I_CHECKPOINT", DEFAULT_T2I_CHECKPOINT)
         ltx_ckpt = env_str("COMFYUI_LTX_CHECKPOINT", DEFAULT_LTX_CHECKPOINT)
         t5 = env_str("COMFYUI_T5", DEFAULT_T5)
+        # GPU 显存与画质档位校对（非阻断）
+        _append_gpu_checks(checks, system_stats, ltx_ckpt)
+        # 配音可用性校对（非阻断：IndexTTS / 网关 / piper / edge-tts 至少一条路）
+        _append_tts_check(checks, comfyui_url, transport)
+        # 口型同步节点校对（on 模式缺节点会阻断运行，属配置错误）
+        lipsync_mode = (
+            os.getenv("PROMPT2VID_LIPSYNC", "auto").strip().lower() or "auto"
+        )
+        if lipsync_mode != "off":
+            try:
+                with httpx.Client(timeout=POLL_TIMEOUT, transport=transport) as client:
+                    lipsync_missing = [
+                        node for node in (
+                            "LatentSyncNode", "VideoLengthAdjuster",
+                            "VHS_LoadVideo", "VHS_VideoCombine",
+                        )
+                        if not _fetch_node_info(client, node, comfyui_url)
+                    ]
+            except Exception as exc:  # noqa: BLE001 - object_info 异常按缺节点处理
+                lipsync_missing = [f"object_info 查询失败: {exc}"]
+            if not lipsync_missing:
+                checks.append(Check(
+                    name="口型同步（LatentSync）", ok=True,
+                    detail="LatentSync + VideoHelperSuite 节点已注册",
+                    required=False,
+                ))
+            else:
+                checks.append(Check(
+                    name="口型同步（LatentSync）", ok=False,
+                    detail="缺少节点: " + ", ".join(lipsync_missing) + (
+                        "（PROMPT2VID_LIPSYNC=on，运行将在口型同步阶段失败）"
+                        if lipsync_mode == "on" else "（auto 模式将跳过口型同步，保留原片段）"
+                    ),
+                    hint="安装 ShmuelRonen/ComfyUI-LatentSyncWrapper 与 "
+                         "Kosinkadink/ComfyUI-VideoHelperSuite（见 docs/LOCAL_SETUP.md），"
+                         "或设 PROMPT2VID_LIPSYNC=off",
+                    required=lipsync_mode == "on",
+                ))
         try:
             with httpx.Client(timeout=POLL_TIMEOUT, transport=transport) as client:
                 loader = _fetch_node_info(client, "CheckpointLoaderSimple", comfyui_url)

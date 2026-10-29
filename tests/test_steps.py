@@ -88,8 +88,18 @@ def _cleanup_logging():
 def test_registry_matches_task_order():
     from prompt2vid.crew import TASK_ORDER
 
-    assert steps.STEP_IDS == TASK_ORDER
-    assert len(steps.STEPS) == 9
+    # crew 任务全部在注册表里且相对顺序一致；sync_lips 是媒体增强步骤
+    # （无 crew 任务，直跑 stages），插在配音与剪辑之间
+    assert [i for i in steps.STEP_IDS if i in TASK_ORDER] == TASK_ORDER
+    assert steps.STEP_IDS == [
+        "analyze_requirement", "write_script", "plan_storyboard",
+        "generate_images", "generate_videos", "generate_voiceover",
+        "sync_lips", "edit_video", "inspect_quality", "publish_douyin",
+    ]
+    lipsync = steps.STEP_BY_ID["sync_lips"]
+    assert lipsync["kind"] == "media"
+    assert lipsync["stage"] == "lipsync"
+    assert steps.STAGE_OUTPUT_DIRS["lipsync"] == "lipsync"
 
 
 def test_catalog_has_labels():

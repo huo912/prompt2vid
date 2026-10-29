@@ -11,6 +11,7 @@
 - frames/manifest.json  {"shots": [{"id", "image", "status", "error", "path"}]}
 - clips/manifest.json   {"shots": [{"id", "video", "status", "error", "path", "length"}]}
 - audio/manifest.json   {"shots": [{"id", "audio", "status", "path"}]}
+- lipsync/manifest.json {"shots": [{"id", "video", "status", "error", "path", "fallback"}]}
 - final/final.mp4 + final/final.srt + final/render_report.json
 - report/quality_report.json
 """
@@ -20,6 +21,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
@@ -28,12 +30,15 @@ from .comfyui_client import (
     ComfyUITaskError,
     ComfyUIClient,
     build_i2v_workflow,
+    build_lipsync_workflow,
     build_t2i_workflow,
     default_t2i_size,
+    env_float,
     env_int,
     env_str,
     image_dimensions,
     ipadapter_enabled,
+    ltx_fps,
     resolve_ltx_size,
     run_text_to_image,
 )
@@ -55,11 +60,17 @@ REQUIREMENT_FILE = "requirement.json"
 FRAMES_DIR = "frames"
 CLIPS_DIR = "clips"
 AUDIO_DIR = "audio"
+LIPSYNC_DIR = "lipsync"
 FINAL_DIR = "final"
 REPORT_DIR = "report"
 
-# LTX 帧数约束：length = 8n+1；帧率与上限可配
-DEFAULT_LTX_FPS = 25
+# LatentSync 口型同步依赖的 ComfyUI 自定义节点（缺任一该阶段跳过/报错）
+_LIPSYNC_NODES = (
+    "LatentSyncNode", "VideoLengthAdjuster", "VHS_LoadVideo", "VHS_VideoCombine",
+)
+
+# LTX 帧数约束：length = 8n+1；帧率（COMFYUI_LTX_FPS，默认 25）与
+# 上限可配，帧率读取统一走 comfyui_client.ltx_fps（工作流同源）
 DEFAULT_LTX_MAX_FRAMES = 121
 MIN_FRAMES = 9  # 8*1+1
 
@@ -86,7 +97,7 @@ def _ltx_prompt(shot: Shot) -> str:
 
 def frames_for_duration(seconds: float) -> int:
     """把每镜时长换算为 LTX 帧数（8n+1，且不超过显存预算上限）。"""
-    fps = env_int("COMFYUI_LTX_FPS", DEFAULT_LTX_FPS)
+    fps = ltx_fps()
     max_frames = max(MIN_FRAMES, env_int("COMFYUI_LTX_MAX_FRAMES", DEFAULT_LTX_MAX_FRAMES))
     target = max(MIN_FRAMES, math.ceil(seconds * fps))
     length = 8 * math.ceil((target - 1) / 8) + 1
@@ -462,6 +473,158 @@ def generate_voiceovers(workspace: str | Path | None = None) -> dict:
     return _summary("voiceovers", entries, manifest_rel)
 
 
+@dataclass
+class _LipSyncJob:
+    """一次口型同步任务：片段 + 配音 → 唇形同步后的片段。"""
+
+    id: int
+    clip_path: Path
+    audio_path: Path
+    dest: Path
+
+
+def _audio_drives(clip_path: Path, audio_path: Path) -> bool:
+    """配音是否比片段长（决定 VideoLengthAdjuster 的对齐方向）。
+
+    探测失败按 True 处理：pingpong 方向下音频只会被静音补齐、绝不被
+    裁剪，是保住旁白的失败安全方向。
+    """
+    try:
+        clip_seconds = ffmpeg_ops.probe_file(clip_path)["duration_seconds"]
+        audio_seconds = ffmpeg_ops.probe_file(audio_path)["duration_seconds"]
+    except (RuntimeError, FileNotFoundError):
+        return True
+    return audio_seconds > clip_seconds
+
+
+def sync_lips(workspace: str | Path | None = None) -> dict:
+    """阶段 4：口型同步——用配音驱动每个片段的唇形（LatentSync）。
+
+    在配音与渲染之间运行：把 clips/ 片段与对应 audio/ 配音上传
+    ComfyUI，LatentSync 1.6 对人物嘴部做音频驱动重绘；配音比片段长时
+    以往返补帧延长（旁白零截断）。单镜失败（无正脸/动漫脸/OOM）保留
+    原片段，渲染阶段自动回退——口型同步是增强能力，不阻塞出片。
+    PROMPT2VID_LIPSYNC：auto（默认，节点齐全才跑）/ on / off。
+    """
+    ws = workspace_root(workspace)
+    mode = env_str("PROMPT2VID_LIPSYNC", "auto").lower() or "auto"
+    if mode == "off":
+        return {"stage": "lipsync", "skipped": "PROMPT2VID_LIPSYNC=off"}
+
+    try:
+        clips = read_manifest(ws / CLIPS_DIR / "manifest.json")
+    except (FileNotFoundError, ValueError) as exc:
+        return {"stage": "lipsync", "error": f"缺少视频片段清单: {exc}"}
+    try:
+        audios = {
+            int(a.get("id", 0)): resolve_in_workspace(a.get("path", a.get("audio", "")), ws)
+            for a in read_manifest(ws / AUDIO_DIR / "manifest.json")
+            if a.get("status") in (None, "ok")
+        }
+    except (FileNotFoundError, ValueError):
+        audios = {}
+
+    ok: dict[int, Path] = {}
+    errors: dict[int, str] = {}
+    skipped: dict[int, str] = {}
+    jobs: list[_LipSyncJob] = []
+    for clip in clips:
+        if clip.get("status") != "ok":
+            continue
+        shot_id = int(clip.get("id", 0))
+        dest = ws / LIPSYNC_DIR / f"shot_{shot_id}.mp4"
+        if dest.is_file() and dest.stat().st_size > 0:
+            ok[shot_id] = dest  # 断点续跑
+            continue
+        clip_path = resolve_in_workspace(clip.get("path", clip.get("video", "")), ws)
+        if not clip_path.is_file():
+            continue
+        audio_path = audios.get(shot_id)
+        if audio_path is None or not audio_path.is_file():
+            skipped[shot_id] = "无配音，保留原片段"
+            continue
+        jobs.append(_LipSyncJob(shot_id, clip_path, audio_path, dest))
+
+    if jobs:
+        with ComfyUIClient() as client:
+            missing = [n for n in _LIPSYNC_NODES if not client.node_exists(n)]
+            if missing:
+                detail = "ComfyUI 缺少口型同步节点: " + ", ".join(missing)
+                if mode == "on":
+                    return {
+                        "stage": "lipsync",
+                        "error": detail + "（安装见 docs/LOCAL_SETUP.md，或设 PROMPT2VID_LIPSYNC=off 跳过）",
+                    }
+                logger.warning(
+                    "lipsync: %s，跳过口型同步（安装见 docs/LOCAL_SETUP.md）", detail
+                )
+                for job in jobs:
+                    skipped[job.id] = "口型同步节点未安装，保留原片段"
+            else:
+                def make_workflow(job: _LipSyncJob) -> dict:
+                    # 上传在提交前串行完成；失败作为该镜错误（保留原片段）
+                    clip_name = client.upload_file(job.clip_path)
+                    audio_name = client.upload_file(job.audio_path)
+                    adjust_mode = (
+                        "pingpong" if _audio_drives(job.clip_path, job.audio_path)
+                        else "normal"
+                    )
+                    return client.filter_workflow_inputs(build_lipsync_workflow(
+                        clip_name=clip_name,
+                        audio_name=audio_name,
+                        mode=adjust_mode,
+                        filename_prefix=f"prompt2vid_lipsync_{job.id}",
+                    ))
+
+                # 口型同步不做整批重试：无人脸/动漫脸的失败重试也不会成功，
+                # 白费几分钟 GPU；瞬时故障由"保留原片段"兜底
+                batch_ok, errors, _retry = _batch_run(
+                    jobs, make_workflow, lambda job: job.dest, client
+                )
+                ok.update(batch_ok)
+                if batch_ok:
+                    logger.info("lipsync: 本批成功 %d / 失败 %d",
+                                len(batch_ok), len(errors))
+
+    entries: list[dict] = []
+    for shot_id in sorted(set(ok) | set(errors) | set(skipped)):
+        if shot_id in ok:
+            entries.append(_ok_entry(
+                shot_id, "video", f"{LIPSYNC_DIR}/shot_{shot_id}.mp4", ok[shot_id]
+            ))
+        elif shot_id in errors:
+            entries.append({
+                "id": shot_id,
+                "status": "failed",
+                "error": errors[shot_id],
+                "fallback": f"{CLIPS_DIR}/shot_{shot_id}.webm",
+            })
+        else:
+            entries.append({"id": shot_id, "status": "skipped", "reason": skipped[shot_id]})
+
+    manifest_rel = f"{LIPSYNC_DIR}/manifest.json"
+    _write_json(ws / manifest_rel, {"shots": entries})
+    summary: dict[str, Any] = {
+        "stage": "lipsync",
+        "total": len(entries),
+        "succeeded": len(ok),
+        "failed": len(errors),
+        "skipped": len(skipped),
+        "manifest": manifest_rel,
+    }
+    if errors:
+        summary["failed_shots"] = [
+            {"id": shot_id, "error": error,
+             "fallback": f"{CLIPS_DIR}/shot_{shot_id}.webm"}
+            for shot_id, error in sorted(errors.items())
+        ]
+        logger.warning(
+            "lipsync: %d 个分镜口型同步失败，将使用原片段（详见 %s）",
+            len(errors), manifest_rel,
+        )
+    return summary
+
+
 def _bgm_path() -> Path | None:
     """可选背景音乐（PROMPT2VID_BGM 指向音频文件时启用，循环低音量混入）。"""
     raw = env_str("PROMPT2VID_BGM", "")
@@ -472,10 +635,11 @@ def _bgm_path() -> Path | None:
 
 
 def render_final(workspace: str | Path | None = None) -> dict:
-    """阶段 4：确定性剪辑——拼接、逐镜音频对齐、SRT 字幕、混流烧录。
+    """阶段 5：确定性剪辑——拼接、逐镜音频对齐、SRT 字幕、混流烧录。
 
     字幕时间轴与音轨时长都基于每个片段的真实时长（ffprobe 探测），
-    不依赖 LLM 手写时间轴。
+    不依赖 LLM 手写时间轴。已有口型同步产物（lipsync/）的镜头优先
+    使用同步后的片段。
     """
     ws = workspace_root(workspace)
     try:
@@ -495,6 +659,17 @@ def render_final(workspace: str | Path | None = None) -> dict:
     except StoryboardError:
         storyboard = {}
 
+    # 口型同步产物优先（lipsync/manifest.json 里状态 ok 的镜头用
+    # lipsync/shot_<id>.mp4 替换原片段；文件缺失时回退原片段）
+    try:
+        lipsync_of = {
+            int(e.get("id", 0)): resolve_in_workspace(e.get("path", ""), ws)
+            for e in read_manifest(ws / LIPSYNC_DIR / "manifest.json")
+            if e.get("status") == "ok"
+        }
+    except (FileNotFoundError, ValueError):
+        lipsync_of = {}
+
     ok_clips = [c for c in clips if c.get("status") == "ok"]
     ok_clips.sort(key=lambda c: int(c.get("id", 0)))
     if not ok_clips:
@@ -503,16 +678,30 @@ def render_final(workspace: str | Path | None = None) -> dict:
     work_dir = ws / FINAL_DIR / "work"
     work_dir.mkdir(parents=True, exist_ok=True)
 
+    # 镜头间交叉过渡（PROMPT2VID_TRANSITION 秒叠化，0 关闭）：
+    # 每个非末段镜头用定格末帧多垫 transition 秒，xfade 的重叠正好吃掉
+    # 垫片——音轨/字幕时间轴不变，旁白在叠化期间自然延续
+    transition = max(0.0, env_float("PROMPT2VID_TRANSITION", 0.5))
+    transition_type = env_str("PROMPT2VID_TRANSITION_TYPE", "fade")
+    if len(ok_clips) < 2:
+        transition = 0.0
+
     # 1. 逐镜：探测真实时长 → 配音超长时延长视频（定格末帧）而非截断配音 →
-    #    音频对齐到该时长（响度归一）→ 规范化转码
+    #    音频对齐到该时长（响度归一）
     normalized: list[Path] = []
     fitted_audio: list[Path] = []
     timings: list[tuple[float, float, str]] = []
     audio_overruns: list[dict] = []
+    clip_infos: list[tuple[int, Path, float, float]] = []  # (id, 路径, 片段长, 有效长)
+    lipsync_used = 0
     cursor = 0.0
     for clip in ok_clips:
         shot_id = int(clip.get("id", 0))
-        clip_path = resolve_in_workspace(clip.get("path", clip.get("video", "")), ws)
+        clip_path = lipsync_of.get(shot_id)
+        if clip_path is not None and clip_path.is_file():
+            lipsync_used += 1
+        else:
+            clip_path = resolve_in_workspace(clip.get("path", clip.get("video", "")), ws)
         try:
             duration = ffmpeg_ops.probe_file(clip_path)["duration_seconds"]
         except (FileNotFoundError, RuntimeError) as exc:
@@ -544,16 +733,12 @@ def render_final(workspace: str | Path | None = None) -> dict:
                     "extended_seconds": round(extend, 2),
                 }
             )
+        clip_infos.append((shot_id, clip_path, duration, effective))
 
         fitted = ffmpeg_ops.fit_audio(
             audio_path, effective, work_dir / f"audio_{shot_id}.wav"
         )
         fitted_audio.append(fitted)
-
-        norm = ffmpeg_ops.normalize_clip(
-            clip_path, work_dir / f"clip_{shot_id}.mp4", extend_seconds=extend
-        )
-        normalized.append(norm)
 
         shot = storyboard.get(shot_id)
         narration = shot.narration if shot else ""
@@ -561,21 +746,77 @@ def render_final(workspace: str | Path | None = None) -> dict:
             timings.append((cursor, cursor + effective, narration))
         cursor += effective
 
-    # 2. 拼接视频与音轨
-    merged = ffmpeg_ops.concat_media(normalized, ws / FINAL_DIR / "merged.mp4")
+    # 过渡不能吃掉镜头本体：按最短镜头的一半时长封顶
+    if transition > 0:
+        transition = min(transition, min(info[3] for info in clip_infos) * 0.5)
+        if transition < 0.1:
+            transition = 0.0
+
+    # 2. 规范化转码（非末段镜头额外定格 transition 秒，供 xfade 重叠消耗）
+    for clip_index, (shot_id, clip_path, duration, effective) in enumerate(clip_infos):
+        extend = effective - duration
+        video_extend = extend + (transition if clip_index < len(clip_infos) - 1 else 0.0)
+        normalized.append(ffmpeg_ops.normalize_clip(
+            clip_path, work_dir / f"clip_{shot_id}.mp4", extend_seconds=video_extend
+        ))
+
+    # 3. 拼接视频与音轨（视频带过渡时走 xfade 链，音轨恒为顺序拼接）
+    if transition > 0:
+        durations = [
+            ffmpeg_ops.probe_file(c)["duration_seconds"] for c in normalized
+        ]
+        offsets: list[float] = []
+        acc = 0.0
+        for j in range(len(normalized) - 1):
+            acc += durations[j]
+            offsets.append(acc - (j + 1) * transition)
+        merged = ffmpeg_ops.merge_with_transitions(
+            normalized, offsets, transition, transition_type,
+            ws / FINAL_DIR / "merged.mp4",
+        )
+        logger.info("render: %d 个镜头以 %.2fs %s 过渡衔接",
+                    len(normalized), transition, transition_type)
+    else:
+        merged = ffmpeg_ops.concat_media(normalized, ws / FINAL_DIR / "merged.mp4")
     voiceover = ffmpeg_ops.concat_media(
         fitted_audio, ws / FINAL_DIR / "voiceover.wav", reencode_audio=True
     )
 
-    # 3. SRT 字幕（基于真实时间轴）
+    # 2.5 可选成片放大（PROMPT2VID_UPSCALE，如 720 或 720x1280）：
+    # 低显存档的 LTX 输出只有 480-576 宽，渲染阶段 lanczos 放大 + 轻锐化
+    # 到平台推荐宽度（不新增细节，但避免平台播放器粗暴拉伸）；
+    # 源已达标时自动跳过
+    upscale_to: tuple[int, int] | None = None
+    upscale_from: tuple[int, int] | None = None
+    upscale_spec = env_str("PROMPT2VID_UPSCALE", "")
+    if upscale_spec:
+        try:
+            src = ffmpeg_ops.probe_file(merged)
+            upscale_from = (
+                int(src.get("width") or 0), int(src.get("height") or 0)
+            )
+        except (RuntimeError, FileNotFoundError):
+            upscale_from = None
+        if upscale_from and all(upscale_from):
+            upscale_to = ffmpeg_ops.upscale_target(*upscale_from, upscale_spec)
+            if upscale_to:
+                logger.info("render: 成片放大 %sx%s → %sx%s（lanczos+轻锐化）",
+                            *upscale_from, *upscale_to)
+            else:
+                logger.info("render: 源 %sx%s 已达标或无法安全放大，跳过放大",
+                            *upscale_from)
+
+    # 4. SRT 字幕（基于真实时间轴）
     srt = None
     if timings:
         srt = ffmpeg_ops.build_srt(timings, ws / FINAL_DIR / "final.srt")
 
-    # 4. 混流 + 烧录字幕一步完成（可选 BGM 背景音乐）
+    # 5. 混流 + 烧录字幕一步完成（可选 BGM 背景音乐；放大在字幕之前，
+    #    字幕按最终分辨率渲染保持锐利）
     bgm = _bgm_path()
     final = ffmpeg_ops.mux_and_burn(
-        merged, voiceover, srt, ws / FINAL_DIR / "final.mp4", bgm=bgm
+        merged, voiceover, srt, ws / FINAL_DIR / "final.mp4", bgm=bgm,
+        upscale_to=upscale_to,
     )
 
     probe = ffmpeg_ops.probe_file(final)
@@ -587,8 +828,18 @@ def render_final(workspace: str | Path | None = None) -> dict:
         "duration_seconds": probe["duration_seconds"],
         "width": probe["width"],
         "height": probe["height"],
+        "fps": probe.get("fps"),
+        "transition": (
+            {"type": transition_type, "seconds": round(transition, 2)}
+            if transition > 0 else None
+        ),
+        "upscale": (
+            {"from": list(upscale_from), "to": list(upscale_to)}
+            if upscale_to else None
+        ),
         "has_audio": probe["has_audio"],
         "audio_overruns": audio_overruns,
+        "lipsync": {"shots": lipsync_used, "total": len(ok_clips)},
         "shots": [
             {"id": int(c.get("id", 0)), "video": c.get("video", c.get("path", ""))}
             for c in ok_clips
@@ -599,7 +850,7 @@ def render_final(workspace: str | Path | None = None) -> dict:
 
 
 def run_quality_checks(workspace: str | Path | None = None) -> dict:
-    """阶段 5：质检——成片存在/时长/分辨率/音轨 + 分镜产物齐全。"""
+    """阶段 6：质检——成片存在/时长/分辨率/音轨 + 分镜产物齐全。"""
     ws = workspace_root(workspace)
     final = ws / FINAL_DIR / "final.mp4"
 
@@ -645,6 +896,30 @@ def run_quality_checks(workspace: str | Path | None = None) -> dict:
     add("audio_track_present", probe.get("has_audio", False),
         f"has_audio={probe.get('has_audio', False)}")
 
+    # 旁白可听见：全部配音源都无声时直接判不合格——TTS 被网络拦截
+    # （edge-tts 403）时会静音占位，成片有音轨但没有人声，必须显式报出
+    narration_files = _narration_files(ws)
+    if narration_files:
+        audible = [
+            p for p in narration_files
+            if (ffmpeg_ops.audio_max_volume(p) or -99.0) > -50.0
+        ]
+        if audible:
+            add("voiceover_audible", True,
+                f"{len(audible)}/{len(narration_files)} 条旁白含真实语音")
+        else:
+            add(
+                "voiceover_audible", False,
+                "全部旁白无声：TTS 未产出真实语音（run.log 里的降级告警"
+                "会说明各引擎失败原因）。修复方式任选其一："
+                "① 在 ComfyUI 安装 IndexTTS-2.5 节点做本地高音质配音"
+                "（推荐，见 docs/LOCAL_SETUP.md §7）；② 本地 "
+                "`pip install piper-tts` 并下载中文音色到 models/tts/"
+                "（离线救急）；③ 配置 PROMPT2VID_TTS_BASE_URL 指向 "
+                "OpenAI 兼容 /audio/speech 网关；④ 经云机代理转发并设 "
+                "EDGE_TTS_PROXY",
+            )
+
     missing_assets = _missing_assets(ws)
     add("assets_complete", not missing_assets,
         "全部产物存在" if not missing_assets else "; ".join(missing_assets[:5]))
@@ -677,6 +952,25 @@ def _expected_duration(ws: Path) -> float:
         except (StoryboardError, TypeError, ValueError):
             continue
     return 0.0
+
+
+def _narration_files(ws: Path) -> list[Path]:
+    """audio/manifest.json 中状态 ok 的旁白音频文件列表。"""
+    path = ws / AUDIO_DIR / "manifest.json"
+    if not path.is_file():
+        return []
+    try:
+        entries = read_manifest(path)
+    except ValueError:
+        return []
+    files: list[Path] = []
+    for entry in entries:
+        if entry.get("status") not in (None, "ok"):
+            continue
+        audio = resolve_in_workspace(entry.get("path", entry.get("audio", "")), ws)
+        if audio.is_file():
+            files.append(audio)
+    return files
 
 
 def _missing_assets(ws: Path) -> list[str]:

@@ -130,6 +130,58 @@ def test_i2v_13b_distilled_uses_low_cfg_and_steps(monkeypatch):
     assert wf["71"]["inputs"]["steps"] == 12
 
 
+def test_t2i_sampling_params_from_env(monkeypatch):
+    """COMFYUI_T2I_CFG / _SAMPLER / _SCHEDULER 覆盖默认 7.0/dpmpp_2m/karras。"""
+    for name in ("COMFYUI_T2I_CFG", "COMFYUI_T2I_SAMPLER",
+                 "COMFYUI_T2I_SCHEDULER"):
+        monkeypatch.delenv(name, raising=False)
+    wf = build_t2i_workflow(prompt="a", seed=1)
+    assert wf["3"]["inputs"]["cfg"] == 7.0
+    assert wf["3"]["inputs"]["sampler_name"] == "dpmpp_2m"
+    assert wf["3"]["inputs"]["scheduler"] == "karras"
+
+    monkeypatch.setenv("COMFYUI_T2I_CFG", "6")
+    monkeypatch.setenv("COMFYUI_T2I_SAMPLER", "dpmpp_2m_sde")
+    monkeypatch.setenv("COMFYUI_T2I_SCHEDULER", "sgm_uniform")
+    wf = build_t2i_workflow(prompt="a", seed=1)
+    assert wf["3"]["inputs"]["cfg"] == 6.0
+    assert wf["3"]["inputs"]["sampler_name"] == "dpmpp_2m_sde"
+    assert wf["3"]["inputs"]["scheduler"] == "sgm_uniform"
+
+
+def test_i2v_webm_crf_and_scheduler_knobs(monkeypatch):
+    """WEBM CRF 默认 20（旧版 32 压缩痕迹重）；shift/采样器可配。"""
+    for name in ("COMFYUI_WEBM_CRF", "COMFYUI_LTX_MAX_SHIFT",
+                 "COMFYUI_LTX_BASE_SHIFT", "COMFYUI_LTX_SAMPLER"):
+        monkeypatch.delenv(name, raising=False)
+    wf = build_i2v_workflow("x.png", "a", width=512, height=768)
+    assert wf["86"]["inputs"]["crf"] == 20.0
+    assert wf["71"]["inputs"]["max_shift"] == 2.05
+    assert wf["71"]["inputs"]["base_shift"] == 0.95
+    assert wf["73"]["inputs"]["sampler_name"] == "euler"
+
+    monkeypatch.setenv("COMFYUI_WEBM_CRF", "24")
+    monkeypatch.setenv("COMFYUI_LTX_MAX_SHIFT", "2.3")
+    monkeypatch.setenv("COMFYUI_LTX_BASE_SHIFT", "1.1")
+    monkeypatch.setenv("COMFYUI_LTX_SAMPLER", "euler_ancestral")
+    wf = build_i2v_workflow("x.png", "a", width=512, height=768)
+    assert wf["86"]["inputs"]["crf"] == 24.0
+    assert wf["71"]["inputs"]["max_shift"] == 2.3
+    assert wf["71"]["inputs"]["base_shift"] == 1.1
+    assert wf["73"]["inputs"]["sampler_name"] == "euler_ancestral"
+
+
+def test_i2v_frame_rate_follows_ltx_fps_env(monkeypatch):
+    """COMFYUI_LTX_FPS 同时驱动 LTXVConditioning 与 SaveWEBM（回退 bug）。"""
+    monkeypatch.delenv("COMFYUI_LTX_FPS", raising=False)
+    wf = build_i2v_workflow("x.png", "a", width=512, height=768)
+    assert wf["69"]["inputs"]["frame_rate"] == wf["86"]["inputs"]["fps"] == 25.0
+
+    monkeypatch.setenv("COMFYUI_LTX_FPS", "30")
+    wf = build_i2v_workflow("x.png", "a", width=512, height=768)
+    assert wf["69"]["inputs"]["frame_rate"] == wf["86"]["inputs"]["fps"] == 30.0
+
+
 def test_ltx_size_keeps_frame_aspect_ratio():
     """首帧 768x1344 不能再被塞进 512x768（会裁/压人物）。"""
     width, height = fit_ltx_size(768, 1344, 512 * 768)
@@ -206,6 +258,17 @@ _NODE_OUTPUT_SLOTS = {
     "VAEDecode": 1,
     "SaveImage": 0,
     "SaveWEBM": 0,
+    # IndexTTS-2.5（chenpipi0807/ComfyUI-Index-TTS）
+    "TimbreAudioLoader": 1,          # AUDIO
+    "LoadAudio": 1,                  # AUDIO（ComfyUI 核心）
+    "IndexTTS25CacheControlNode": 1, # cache_control DICT
+    "IndexTTS25BaseNode": 3,         # audio / seed / subtitle
+    "SaveAudio": 0,
+    # LatentSync 口型同步（ShmuelRonen/ComfyUI-LatentSyncWrapper + VHS）
+    "VHS_LoadVideo": 4,              # IMAGE / frame_count / audio / video_info
+    "VideoLengthAdjuster": 2,        # IMAGE / AUDIO
+    "LatentSyncNode": 2,             # IMAGE / AUDIO
+    "VHS_VideoCombine": 1,           # VHS_FILENAMES
 }
 
 
@@ -416,3 +479,141 @@ def test_workflow_links_within_slots_with_lora():
                     f"节点 {node_id}({node['class_type']}).{name} 引用了 "
                     f"{src_id}({src_class}) 的输出槽 {slot}，但该节点只有 {slots} 个输出"
                 )
+
+
+# ------------------------------------------------------------ IndexTTS 配音
+
+
+def test_tts_workflow_structure_with_bundled_timbre(monkeypatch):
+    from prompt2vid.comfyui_client import build_tts_workflow
+
+    for name in ("PROMPT2VID_TTS_TIMBRE", "PROMPT2VID_TTS_LANG",
+                 "PROMPT2VID_TTS_SPEED", "PROMPT2VID_TTS_SILENCE_MS",
+                 "PROMPT2VID_TTS_KEEP_CACHED", "PROMPT2VID_TTS_REF_AUDIO"):
+        monkeypatch.delenv(name, raising=False)
+
+    wf = build_tts_workflow("秋天的公园")
+
+    # 自带音色：TimbreAudioLoader → (缓存控制) → IndexTTS25BaseNode → SaveAudio
+    assert wf["timbre"]["class_type"] == "TimbreAudioLoader"
+    assert wf["timbre"]["inputs"]["audio_file"] == "甜美女声.mp3"
+    assert wf["cache"]["class_type"] == "IndexTTS25CacheControlNode"
+    assert wf["cache"]["inputs"]["keep_models_cached"] is True
+    tts_inputs = wf["tts"]["inputs"]
+    assert wf["tts"]["class_type"] == "IndexTTS25BaseNode"
+    assert tts_inputs["text"] == "秋天的公园"
+    assert tts_inputs["reference_audio"] == ["timbre", 0]
+    assert tts_inputs["cache_control"] == ["cache", 0]
+    assert tts_inputs["lang"] == "ZH"
+    assert tts_inputs["duration_factor"] == 1.0
+    assert tts_inputs["interval_silence_ms"] == 200
+    assert wf["save"]["inputs"]["audio"] == ["tts", 0]
+    # JSON 可序列化（/prompt 的 body）
+    json.dumps(wf, ensure_ascii=False)
+
+
+def test_tts_workflow_reference_audio_and_env(monkeypatch):
+    """自定义参考音频走核心 LoadAudio（声音克隆），且不挂缓存节点。"""
+    from prompt2vid.comfyui_client import build_tts_workflow
+
+    monkeypatch.setenv("PROMPT2VID_TTS_LANG", "EN")
+    monkeypatch.setenv("PROMPT2VID_TTS_SPEED", "1.2")
+    monkeypatch.setenv("PROMPT2VID_TTS_SILENCE_MS", "300")
+    monkeypatch.setenv("PROMPT2VID_TTS_KEEP_CACHED", "false")
+
+    wf = build_tts_workflow("hello", reference_audio="my_voice.wav")
+
+    assert wf["timbre"]["class_type"] == "LoadAudio"
+    assert wf["timbre"]["inputs"]["audio"] == "my_voice.wav"
+    assert "cache" not in wf
+    assert "cache_control" not in wf["tts"]["inputs"]
+    assert wf["tts"]["inputs"]["lang"] == "EN"
+    assert wf["tts"]["inputs"]["duration_factor"] == 1.2
+    assert wf["tts"]["inputs"]["interval_silence_ms"] == 300
+
+
+def test_tts_workflow_links_within_output_slots():
+    from prompt2vid.comfyui_client import build_tts_workflow
+
+    for wf in (
+        build_tts_workflow("你好"),
+        build_tts_workflow("hello", reference_audio="ref.wav"),
+    ):
+        for node_id, node in wf.items():
+            assert node["class_type"] in _NODE_OUTPUT_SLOTS, node["class_type"]
+            for name, value in node["inputs"].items():
+                if not (isinstance(value, list) and len(value) == 2):
+                    continue
+                src_id, slot = value
+                src_class = wf[src_id]["class_type"]
+                assert slot < _NODE_OUTPUT_SLOTS[src_class]
+
+
+# ------------------------------------------------------------ LatentSync 口型同步
+
+
+def test_lipsync_workflow_structure(monkeypatch):
+    from prompt2vid.comfyui_client import build_lipsync_workflow
+
+    for name in ("PROMPT2VID_LIPSYNC_EXPRESSION", "PROMPT2VID_LIPSYNC_STEPS",
+                 "PROMPT2VID_LIPSYNC_CRF", "COMFYUI_LTX_FPS"):
+        monkeypatch.delenv(name, raising=False)
+
+    wf = build_lipsync_workflow("shot_1.webm", "shot_1.mp3", seed=7)
+
+    # VHS_LoadVideo(25fps) + LoadAudio → VideoLengthAdjuster → LatentSync → VHS_VideoCombine
+    assert wf["load_video"]["class_type"] == "VHS_LoadVideo"
+    assert wf["load_video"]["inputs"]["video"] == "shot_1.webm"
+    assert wf["load_video"]["inputs"]["force_rate"] == 25.0
+    assert wf["load_audio"]["class_type"] == "LoadAudio"
+    assert wf["load_audio"]["inputs"]["audio"] == "shot_1.mp3"
+    adjust = wf["adjust"]
+    assert adjust["class_type"] == "VideoLengthAdjuster"
+    assert adjust["inputs"]["mode"] == "pingpong"
+    assert adjust["inputs"]["fps"] == 25.0
+    assert adjust["inputs"]["images"] == ["load_video", 0]
+    assert adjust["inputs"]["audio"] == ["load_audio", 0]
+    sync = wf["latentsync"]
+    assert sync["class_type"] == "LatentSyncNode"
+    assert sync["inputs"]["images"] == ["adjust", 0]
+    assert sync["inputs"]["audio"] == ["adjust", 1]
+    assert sync["inputs"]["seed"] == 7
+    assert sync["inputs"]["lips_expression"] == 1.5
+    assert sync["inputs"]["inference_steps"] == 20
+    save = wf["save"]
+    assert save["class_type"] == "VHS_VideoCombine"
+    assert save["inputs"]["images"] == ["latentsync", 0]
+    assert save["inputs"]["frame_rate"] == 25.0
+    assert save["inputs"]["format"] == "video/h264-mp4"
+    assert save["inputs"]["save_output"] is True
+    assert save["inputs"]["crf"] == 19
+    json.dumps(wf, ensure_ascii=False)
+
+
+def test_lipsync_workflow_env_overrides(monkeypatch):
+    from prompt2vid.comfyui_client import build_lipsync_workflow
+
+    monkeypatch.setenv("PROMPT2VID_LIPSYNC_EXPRESSION", "2.2")
+    monkeypatch.setenv("PROMPT2VID_LIPSYNC_STEPS", "30")
+    monkeypatch.setenv("PROMPT2VID_LIPSYNC_CRF", "17")
+
+    wf = build_lipsync_workflow("c.webm", "a.mp3", mode="normal")
+
+    assert wf["adjust"]["inputs"]["mode"] == "normal"
+    assert wf["latentsync"]["inputs"]["lips_expression"] == 2.2
+    assert wf["latentsync"]["inputs"]["inference_steps"] == 30
+    assert wf["save"]["inputs"]["crf"] == 17
+
+
+def test_lipsync_workflow_links_within_output_slots():
+    from prompt2vid.comfyui_client import build_lipsync_workflow
+
+    wf = build_lipsync_workflow("c.webm", "a.mp3")
+    for node_id, node in wf.items():
+        assert node["class_type"] in _NODE_OUTPUT_SLOTS, node["class_type"]
+        for name, value in node["inputs"].items():
+            if not (isinstance(value, list) and len(value) == 2):
+                continue
+            src_id, slot = value
+            src_class = wf[src_id]["class_type"]
+            assert slot < _NODE_OUTPUT_SLOTS[src_class]

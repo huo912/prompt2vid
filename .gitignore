@@ -21,3 +21,6 @@ output/*
 .idea/
 .vscode/
 .DS_Store
+
+# --- 本地大模型文件（piper TTS 音色等，见 docs/QUALITY.md）---
+models/

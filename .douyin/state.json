@@ -1,4 +1,32 @@
 {
-  "last_publish": null,
-  "published": []
+  "last_publish": {
+    "status": "dry_run",
+    "title": "沈阳年年修路的秘密：总指挥是条哈士奇",
+    "tags": [
+      "沈阳",
+      "哈士奇",
+      "城市吐槽",
+      "搞笑动画",
+      "东北人日常"
+    ],
+    "item_id": null,
+    "published_at": "2026-10-29T06:22:08.908791+00:00",
+    "video": "D:\\temp\\prompt2vid\\output\\run_20261029_141326\\final\\final.mp4"
+  },
+  "published": [
+    {
+      "status": "dry_run",
+      "title": "沈阳年年修路的秘密：总指挥是条哈士奇",
+      "tags": [
+        "沈阳",
+        "哈士奇",
+        "城市吐槽",
+        "搞笑动画",
+        "东北人日常"
+      ],
+      "item_id": null,
+      "published_at": "2026-10-29T06:22:08.908791+00:00",
+      "video": "D:\\temp\\prompt2vid\\output\\run_20261029_141326\\final\\final.mp4"
+    }
+  ]
 }

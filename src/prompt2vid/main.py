@@ -131,7 +131,7 @@ def main(argv: list[str] | None = None) -> int:
         "--from",
         dest="from_stage",
         default="frames",
-        choices=["frames", "clips", "voiceovers", "render", "quality"],
+        choices=["frames", "clips", "voiceovers", "lipsync", "render", "quality"],
         help="续跑起始阶段（默认 frames，配合 --resume）",
     )
     parser.add_argument(

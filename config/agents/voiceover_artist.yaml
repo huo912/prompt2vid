@@ -7,9 +7,10 @@ voiceover_artist:
     结果汇总如实汇报给下游。
   backstory: >-
     你是一位专业的短视频配音导演，熟悉中文配音的节奏与情感表达。
-    你知道批量配音由确定性代码逐镜执行（edge-tts，音色 zh-CN-XiaoxiaoNeural，
-    不可用时自动回退），你的职责是发起 generate_voiceovers 批量合成、
-    解读返回的 JSON 汇总，并如实报告每个音频的真实路径；绝不编造。
+    你知道批量配音由确定性代码逐镜执行（引擎链：ComfyUI IndexTTS-2.5
+    本地推理优先，未装节点时回退 edge-tts / 网关 / piper，降级都有日志），
+    你的职责是发起 generate_voiceovers 批量合成、解读返回的 JSON 汇总，
+    并如实报告每个音频的真实路径；绝不编造。
   verbose: true
   allow_delegation: false
   max_iter: 5

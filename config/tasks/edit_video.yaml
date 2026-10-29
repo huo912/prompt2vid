@@ -1,18 +1,22 @@
 edit_video:
   description: >-
-    将所有素材合成为最终成片。
-    直接调用 render_final 工具（无需任何参数）：该工具会自动读取工作目录
-    的 clips/manifest.json、audio/manifest.json 与 storyboard.json，
-    确定性地完成：
+    先做口型同步，再将所有素材合成为最终成片。
+    第一步：直接调用 sync_lips 工具（无需任何参数）：该工具会自动读取
+    工作目录的 clips/manifest.json 与 audio/manifest.json，用配音驱动每个
+    分镜片段的唇形（LatentSync 口型同步），产出 lipsync/manifest.json；
+    单镜失败（无正脸/动漫脸/OOM）会保留原片段，不阻塞后续步骤。
+    第二步：直接调用 render_final 工具（无需任何参数）：该工具会自动读取
+    工作目录的 clips/manifest.json、audio/manifest.json 与 storyboard.json，
+    优先使用口型同步产物，确定性地完成：
     1. 逐镜探测真实时长并把配音对齐到该时长（不足静音填充）；
     2. 按分镜顺序拼接视频片段；
     3. 按真实时间轴生成 SRT 中文字幕；
     4. 混流音轨并烧录字幕，产出 final/final.mp4 与 final/render_report.json。
-    调用完成后，把工具返回的 JSON 汇总（成片路径、时长、分辨率、音轨）
-    原样作为你的最终回答，可附一句简短结论。
+    调用完成后，把 render_final 返回的 JSON 汇总（成片路径、时长、分辨率、
+    音轨、口型同步镜头数）原样作为你的最终回答，可附一句简短结论。
     如需补充核验，可调用 probe 工具探测 final/final.mp4。
     不要自己分步调用 ffmpeg 工具，不要手工生成字幕时间轴。
   expected_output: >-
     render_final 工具返回的 JSON 汇总：final_video、duration_seconds、
-    width、height、has_audio、shots。
+    width、height、has_audio、lipsync、shots。
   agent: video_editor
