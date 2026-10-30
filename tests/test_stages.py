@@ -134,7 +134,8 @@ class FakeComfyUIClient:
 
     def upload_file(self, file_path, name=None) -> str:
         self.uploads.append(Path(file_path))
-        return Path(file_path).name
+        # 真实客户端返回服务端落盘名（name 优先）；mock 保持同一契约
+        return name or Path(file_path).name
 
     def node_exists(self, node: str) -> bool:
         return node not in self._missing_nodes
@@ -552,6 +553,43 @@ def test_sync_lips_submits_latentsync_workflows(tmp_path, monkeypatch):
     manifest = json.loads((ws / "lipsync" / "manifest.json").read_text(encoding="utf-8"))
     assert [s["id"] for s in manifest["shots"]] == [1, 2]
     assert all(s["status"] == "ok" for s in manifest["shots"])
+
+
+def test_sync_lips_muxes_silent_track_for_audio_less_clips(tmp_path, monkeypatch):
+    """LTX 片段天然无音轨：上传前补静音轨，防 VHS_LoadVideo 缓存扫描崩溃。"""
+    ws = _lipsync_workspace(tmp_path, monkeypatch)
+    fake = _use_fake_client(monkeypatch)
+
+    def probe(path):
+        path = Path(path)
+        seconds = 5.0 if path.suffix == ".mp3" else 2.0
+        return {"path": str(path), "duration_seconds": seconds,
+                "width": 512, "height": 768, "fps": 25.0, "has_audio": False}
+
+    monkeypatch.setattr(stages.ffmpeg_ops, "probe_file", probe)
+
+    muxed: list[Path] = []
+
+    def fake_run_ffmpeg(args):
+        dest = Path(args[-1])
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(b"clip-with-silent-track")
+        muxed.append(dest)
+        return ""
+
+    monkeypatch.setattr(stages.ffmpeg_ops, "run_ffmpeg", fake_run_ffmpeg)
+
+    result = stages.sync_lips()
+
+    assert result["succeeded"] == 2
+    assert [p.name for p in muxed] == ["shot_1_audio.webm", "shot_2_audio.webm"]
+    # 上传的是补轨副本，但沿用原文件名——覆盖服务器上残留的旧副本
+    assert {p.name for p in fake.uploads} == {
+        "shot_1_audio.webm", "shot_2_audio.webm", "shot_1.mp3", "shot_2.mp3",
+    }
+    assert {w["load_video"]["inputs"]["video"] for w in fake.submitted} == {
+        "shot_1.webm", "shot_2.webm",
+    }
 
 
 def test_sync_lips_normal_mode_when_clip_longer(tmp_path, monkeypatch):

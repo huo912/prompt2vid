@@ -405,6 +405,25 @@ python ComfyUI-Index-TTS\TTS2_5_download.py
 # 重启 ComfyUI
 ```
 
+> ⚠ **下载脚本对单步失败不中断**（打 `✗` 后继续跑其余步骤）：跑完务必看
+> 末尾的校验输出，确认 6 个核心权重 `feat1.pt` / `feat2.pt` / `gpt.pth` /
+> `codec.pth` / `s2mel.pth` / `wav2vec2bert_stats.pt` 都落在
+> `models/IndexTTS-2.5/` 下——大文件最容易超时失败，恰好就是这批；缺了
+> 它们节点会在推理时报 `FileNotFoundError: IndexTTS-2.5 missing files`。
+> 定向补齐（Linux 服务器示例，Windows 把 `export` 换成 `set`）：
+>
+> ```bash
+> export HF_ENDPOINT=https://hf-mirror.com
+> huggingface-cli download IndexTeam/IndexTTS-2.5 \
+>   config.yaml codec.pth feat1.pt feat2.pt gpt.pth s2mel.pth \
+>   wav2vec2bert_stats.pt multilingual_zh_ja_yue_char_del.tiktoken \
+>   --local-dir "<ComfyUI目录>/models/IndexTTS-2.5"
+> ```
+>
+> 注意：脚本会在模型目录里再留一份 `hf_cache/`（约双倍占盘），全部
+> 校验通过后可删；克隆自定义音色时若报缺 `campplus_cn_common.bin`，
+> 同样方式从 `funasr/campplus` 仓库补到模型根目录。
+
 ### 7.2 配置与验证
 
 `.env` 无需改动（默认 `PROMPT2VID_TTS_ENGINE=auto`：探测到节点即用）。
@@ -463,6 +482,16 @@ pip install -r ComfyUI-VideoHelperSuite\requirements.txt
 # HuggingFace ByteDance/LatentSync-1.6 下载（国内先设 HF_ENDPOINT 镜像），
 # 也可用该仓库 README 提供的 Google Drive 预配置整包
 ```
+
+> ⚠ **两个环境前提**（缺一会在运行期报错）：
+> 1. **PATH 里要有 `ffmpeg` 命令**：LatentSyncWrapper 启动节点时直接调
+>    `ffmpeg -version` 检测——`imageio-ffmpeg` 的内置二进制**不算数**。
+>    Windows 参考 §5.1 安装；Linux 服务器 `apt-get install -y ffmpeg`。
+> 2. **上传的片段必须带音轨**：VHS_LoadVideo 的懒加载音频输出会在
+>    ComfyUI 内存缓存扫描时提取音轨，无音轨视频直接崩（"Output file
+>    does not contain any stream"）。LTX 生成的片段天然无声——流水线
+>    已在上传前自动补静音轨（`ffmpeg_ops.ensure_audio_track`，幂等），
+>    无需手工处理；仅手工往 ComfyUI input 塞视频时需注意。
 
 ### 8.2 配置与验证
 

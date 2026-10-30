@@ -816,9 +816,11 @@ def _apply_ipadapter(
     model_src 是 IPAdapter 之前的 MODEL 来源（checkpoint 直出，或经过
     LoRA 之后的输出），保证 LoRA 与 IPAdapter 可以叠加。
 
-    节点签名对照 ComfyUI_IPAdapter_plus（cubiq）当前版本；未安装该
-    自定义节点或模型时 ComfyUI 会拒绝工作流，由调用方（stages 的
-    重试机制）降级为无参考生成。
+    节点签名对照 ComfyUI_IPAdapter_plus（cubiq）当前版本：loader 的
+    预设输入已由 `ipadapter` 改名 `preset`（ipadapter 变为可选的
+    IPADAPTER 直连口），apply 节点的 start_at/end_at/weight_type 由
+    可选转为必填；未安装该自定义节点或版本不符时 ComfyUI 会拒绝
+    工作流，由调用方（stages 的重试机制）降级为无参考生成。
     """
     weight = reference.get("weight")
     if weight is None:
@@ -832,7 +834,7 @@ def _apply_ipadapter(
     }
     workflow["ref_loader"] = {
         "class_type": "IPAdapterUnifiedLoader",
-        "inputs": {"model": model_src, "ipadapter": preset},
+        "inputs": {"model": model_src, "preset": preset},
     }
     workflow["ref_apply"] = {
         "class_type": "IPAdapter",
@@ -841,9 +843,9 @@ def _apply_ipadapter(
             "ipadapter": ["ref_loader", 1],
             "image": ["ref_image", 0],
             "weight": weight,
-            "weight_faceidv2": False,
-            "weight_kolors": False,
-            "combine_embeds": "concat",
+            "start_at": 0.0,
+            "end_at": 1.0,
+            "weight_type": "standard",
         },
     }
     return ["ref_apply", 0]

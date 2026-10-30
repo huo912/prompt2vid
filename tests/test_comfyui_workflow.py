@@ -320,10 +320,13 @@ def test_t2i_workflow_with_reference():
     assert wf["ref_image"]["class_type"] == "LoadImage"
     assert wf["ref_image"]["inputs"]["image"] == "character_ref_1.png"
     assert wf["ref_loader"]["class_type"] == "IPAdapterUnifiedLoader"
-    assert wf["ref_loader"]["inputs"]["ipadapter"] == "PLUS FACE (portraits)"
+    assert wf["ref_loader"]["inputs"]["preset"] == "PLUS FACE (portraits)"
     assert wf["ref_loader"]["inputs"]["model"] == ["44", 0]
     assert wf["ref_apply"]["class_type"] == "IPAdapter"
     assert wf["ref_apply"]["inputs"]["weight"] == 0.9
+    assert wf["ref_apply"]["inputs"]["start_at"] == 0.0
+    assert wf["ref_apply"]["inputs"]["end_at"] == 1.0
+    assert wf["ref_apply"]["inputs"]["weight_type"] == "standard"
     assert wf["ref_apply"]["inputs"]["image"] == ["ref_image", 0]
     assert wf["ref_apply"]["inputs"]["model"] == ["ref_loader", 0]
     # KSampler 的 model 改接 adapter 输出，其余连线不变
@@ -333,10 +336,10 @@ def test_t2i_workflow_with_reference():
 
 
 def test_t2i_workflow_reference_defaults_from_env(monkeypatch):
-    monkeypatch.setenv("COMFYUI_IPADAPTER_PRESET", "FACEID PLUS v2")
+    monkeypatch.setenv("COMFYUI_IPADAPTER_PRESET", "VIT-G (medium strength)")
     monkeypatch.setenv("COMFYUI_IPADAPTER_WEIGHT", "0.6")
     wf = build_t2i_workflow(prompt="a", reference={"image_name": "ref.png"})
-    assert wf["ref_loader"]["inputs"]["ipadapter"] == "FACEID PLUS v2"
+    assert wf["ref_loader"]["inputs"]["preset"] == "VIT-G (medium strength)"
     assert wf["ref_apply"]["inputs"]["weight"] == 0.6
 
 

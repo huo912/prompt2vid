@@ -335,6 +335,34 @@ def probe_file(media: str | Path) -> dict:
     }
 
 
+def ensure_audio_track(video: str | Path, dest: str | Path) -> Path:
+    """确保视频带音轨：无音轨时向 dest 混入一条静音轨（视频流无损 copy）。
+
+    已有音轨、或探测不可用（本地无 ffmpeg，混流同样无法进行）时原样
+    返回 video，调用方直接上传原文件即可。背景：ComfyUI 的
+    VHS_LoadVideo 对无音轨视频的懒加载音频输出，会在服务端内存缓存
+    扫描时触发提取并崩溃（"Output file does not contain any stream"）
+    ——LTX 生成的片段天然无声，上传给口型同步前必须补轨。
+    """
+    video = Path(video)
+    try:
+        if probe_file(video).get("has_audio"):
+            return video
+    except (RuntimeError, FileNotFoundError):
+        return video
+    dest = Path(dest)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    # webm/mkv 容器只收 vorbis/opus 族；mp4 等走 aac（内置编码器必然可用）
+    audio_codec = "libopus" if dest.suffix.lower() in (".webm", ".mkv") else "aac"
+    run_ffmpeg([
+        "-i", str(video),
+        "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
+        "-c:v", "copy", "-c:a", audio_codec, "-shortest",
+        str(dest),
+    ])
+    return dest
+
+
 def _srt_timestamp(seconds: float) -> str:
     total_ms = max(0, round(seconds * 1000))
     hours, rem = divmod(total_ms, 3_600_000)

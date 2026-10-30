@@ -563,7 +563,18 @@ def sync_lips(workspace: str | Path | None = None) -> dict:
             else:
                 def make_workflow(job: _LipSyncJob) -> dict:
                     # 上传在提交前串行完成；失败作为该镜错误（保留原片段）
-                    clip_name = client.upload_file(job.clip_path)
+                    # LTX 片段天然无音轨，而 VHS_LoadVideo 的懒加载音频会在
+                    # 服务端缓存扫描时提取音轨、无轨即崩——上传前补一条静音
+                    # 轨（视频流无损 copy），并沿用原文件名覆盖服务器上残留
+                    # 的无音轨旧副本
+                    upload_clip = ffmpeg_ops.ensure_audio_track(
+                        job.clip_path,
+                        ws / LIPSYNC_DIR
+                        / f"{job.clip_path.stem}_audio{job.clip_path.suffix}",
+                    )
+                    clip_name = client.upload_file(
+                        upload_clip, name=job.clip_path.name
+                    )
                     audio_name = client.upload_file(job.audio_path)
                     adjust_mode = (
                         "pingpong" if _audio_drives(job.clip_path, job.audio_path)

@@ -134,6 +134,70 @@ def test_run_ffmpeg_uses_resolved_binary(monkeypatch):
     assert seen["cmd"][0] == "/opt/ffmpeg/bin/ffmpeg"
 
 
+# ------------------------------------------------------------ 音轨补齐
+
+def test_ensure_audio_track_passes_through_when_audio_present(monkeypatch, tmp_path):
+    """已有音轨不重封装，直接返回原文件（幂等）。"""
+    monkeypatch.setattr(
+        ffmpeg_ops, "probe_file",
+        lambda p: {"has_audio": True, "duration_seconds": 2.0},
+    )
+    video = tmp_path / "shot_1.webm"
+    video.write_bytes(b"clip")
+    dest = tmp_path / "lipsync" / "shot_1_audio.webm"
+    assert ffmpeg_ops.ensure_audio_track(video, dest) == video
+    assert not dest.exists()
+
+
+def test_ensure_audio_track_passes_through_when_probe_unavailable(monkeypatch, tmp_path):
+    """本地探测不可用（无 ffmpeg）时退回原文件，不阻塞上传。"""
+
+    def broken_probe(path):
+        raise RuntimeError("no ffmpeg")
+
+    monkeypatch.setattr(ffmpeg_ops, "probe_file", broken_probe)
+    video = tmp_path / "shot_1.webm"
+    video.write_bytes(b"clip")
+    assert ffmpeg_ops.ensure_audio_track(video, tmp_path / "out.webm") == video
+
+
+def test_ensure_audio_track_muxes_silent_opus_for_webm(monkeypatch, tmp_path):
+    """无音轨 webm：lavfi 静音轨 + 视频流无损 copy + opus 编码。"""
+    monkeypatch.setattr(
+        ffmpeg_ops, "probe_file",
+        lambda p: {"has_audio": False, "duration_seconds": 2.0},
+    )
+    seen = _capture_ffmpeg_args(monkeypatch)
+    video = tmp_path / "shot_1.webm"
+    video.write_bytes(b"clip")
+    dest = tmp_path / "shot_1_audio.webm"
+
+    assert ffmpeg_ops.ensure_audio_track(video, dest) == dest
+
+    args = seen[-1]
+    joined = " ".join(args)
+    assert "-f lavfi -i anullsrc=r=44100:cl=stereo" in joined
+    assert "-c:v copy" in joined
+    assert "-c:a libopus" in joined
+    assert "-shortest" in joined
+    assert str(video) in joined and str(dest) in joined
+
+
+def test_ensure_audio_track_uses_aac_for_mp4(monkeypatch, tmp_path):
+    """mp4 容器走 aac（webm 容器不收 aac，mp4 不保证有 opus 编码器）。"""
+    monkeypatch.setattr(
+        ffmpeg_ops, "probe_file",
+        lambda p: {"has_audio": False, "duration_seconds": 2.0},
+    )
+    seen = _capture_ffmpeg_args(monkeypatch)
+    video = tmp_path / "shot_1.mp4"
+    video.write_bytes(b"clip")
+
+    ffmpeg_ops.ensure_audio_track(video, tmp_path / "shot_1_audio.mp4")
+
+    assert "-c:a aac" in " ".join(seen[-1])
+
+
 # ------------------------------------------------------------ 画质参数
 
 def _capture_ffmpeg_args(monkeypatch):

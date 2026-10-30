@@ -583,7 +583,7 @@ hf download Lightricks/LTX-Video ltx-video-2b-v0.9.5.safetensors
 hf download comfyanonymous/flux_text_encoders t5xxl_fp8_e4m3fn.safetensors
 --local-dir "$MODELS/text_encoders"
 
-ssh -p 44264 root@connect.westd.seetacloud.com
+ssh -N -L 8188:127.0.0.1:8188 -p 29182 root@connect.westb.seetacloud.com
 
 prompt2vid "一只戴着安全帽、叼着施工图纸的哈士奇，站在沈阳街头，前爪握着一支巨大的毛笔，像指挥家一样大笔一挥，面前原本平整崭新的柏油马路瞬间被画成一块一块的方块补丁。道路看起来像刚出土的兵马俑坑，东一块、西一块，深浅不一，仿佛城市地下藏着一支等待修复的陶土军团。哈士奇眼神无辜又认真，尾巴摇得像施工警示灯，身后还拖着几块“前方施工”“请绕行”“刚修好，别 踩”的铁皮牌子。
 画面风格为夸张搞笑卡通插画，色彩明亮，带一点尘土飞扬的怀旧感。背景是沈阳的城市街景：老式居民楼、地铁围挡、共享单车、公交站牌，远处隐约可见故宫角楼和中街商圈。天空灰蒙蒙却不压抑，反而像一首老歌的前奏。
@@ -597,3 +597,106 @@ python ComfyUI-Index-TTS\TTS2_5_download.py # 模型约 8-10GB，支持 hf-mirro
 git clone https://github.com/ShmuelRonen/ComfyUI-LatentSyncWrapper.git
 pip install -r ComfyUI-LatentSyncWrapper\requirements.txt # 首次运行自动下模型（约 7GB）
 git clone https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite.git # 如未装
+
+[ERROR] !!! Exception during processing !!! Model download failed. See instructions above.
+[ERROR] Traceback (most recent call last):
+File "/root/miniconda3/lib/python3.12/site-packages/httpx2/\_transports/default.py", line 98, in map_httpcore_exceptions
+yield
+File "/root/miniconda3/lib/python3.12/site-packages/httpx2/\_transports/default.py", line 245, in handle_request
+resp = self.\_pool.handle_request(req)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+File "/root/miniconda3/lib/python3.12/site-packages/httpcore2/\_sync/connection_pool.py", line 242, in handle_request
+raise exc from None
+File "/root/miniconda3/lib/python3.12/site-packages/httpcore2/\_sync/connection_pool.py", line 224, in handle_request
+response = connection.handle_request(pool_request.request)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+File "/root/miniconda3/lib/python3.12/site-packages/httpcore2/\_sync/connection.py", line 94, in handle_request
+raise exc
+File "/root/miniconda3/lib/python3.12/site-packages/httpcore2/\_sync/connection.py", line 74, in handle_request
+stream = self.\_connect(request)
+^^^^^^^^^^^^^^^^^^^^^^
+File "/root/miniconda3/lib/python3.12/site-packages/httpcore2/\_sync/connection.py", line 117, in \_connect
+stream = self.\_network_backend.connect_tcp(\*\*kwargs)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+File "/root/miniconda3/lib/python3.12/site-packages/httpcore2/\_backends/sync.py", line 203, in connect_tcp
+with map_exceptions(exc_map):
+File "/root/miniconda3/lib/python3.12/contextlib.py", line 158, in **exit**
+self.gen.throw(value)
+File "/root/miniconda3/lib/python3.12/site-packages/httpcore2/\_exceptions.py", line 17, in map_exceptions
+raise to_exc(exc) from exc
+httpcore2.ConnectError: [Errno 99] Cannot assign requested address
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+File "/root/miniconda3/lib/python3.12/site-packages/huggingface_hub/\_snapshot_download.py", line 279, in snapshot_download
+repo_info = api.repo_info(repo_id=repo_id, repo_type=repo_type, revision=revision)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+File "/root/miniconda3/lib/python3.12/site-packages/huggingface_hub/utils/\_validators.py", line 89, in \_inner_fn
+return fn(*args, \*\*kwargs)
+^^^^^^^^^^^^^^^^^^^
+File "/root/miniconda3/lib/python3.12/site-packages/huggingface_hub/hf_api.py", line 3535, in repo_info
+return method(
+^^^^^^^
+File "/root/miniconda3/lib/python3.12/site-packages/huggingface_hub/utils/\_validators.py", line 89, in \_inner_fn
+return fn(*args, \*\*kwargs)
+^^^^^^^^^^^^^^^^^^^
+File "/root/miniconda3/lib/python3.12/site-packages/huggingface_hub/hf_api.py", line 3214, in model_info
+r = get_session().get(path, headers=headers, timeout=timeout, params=params)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+File "/root/miniconda3/lib/python3.12/site-packages/httpx2/\_client.py", line 1112, in get
+return self.request(
+^^^^^^^^^^^^^
+File "/root/miniconda3/lib/python3.12/site-packages/httpx2/\_client.py", line 796, in request
+return self.send(request, auth=auth, follow_redirects=follow_redirects)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+File "/root/miniconda3/lib/python3.12/site-packages/httpx2/\_client.py", line 979, in send
+response = self.\_send_handling_auth(
+^^^^^^^^^^^^^^^^^^^^^^^^^
+File "/root/miniconda3/lib/python3.12/site-packages/httpx2/\_client.py", line 1007, in \_send_handling_auth
+response = self.\_send_handling_redirects(
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+File "/root/miniconda3/lib/python3.12/site-packages/httpx2/\_client.py", line 1042, in \_send_handling_redirects
+response = self.\_send_single_request(request)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+File "/root/miniconda3/lib/python3.12/site-packages/httpx2/\_client.py", line 1075, in \_send_single_request
+response = transport.handle_request(request)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+File "/root/miniconda3/lib/python3.12/site-packages/httpx2/\_transports/default.py", line 244, in handle_request
+with map_httpcore_exceptions():
+File "/root/miniconda3/lib/python3.12/contextlib.py", line 158, in **exit**
+self.gen.throw(value)
+File "/root/miniconda3/lib/python3.12/site-packages/httpx2/\_transports/default.py", line 115, in map_httpcore_exceptions
+raise mapped_exc(message) from exc
+httpx2.ConnectError: [Errno 99] Cannot assign requested address
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+File "/root/autodl-tmp/ComfyUI/custom_nodes/ComfyUI-LatentSyncWrapper/nodes.py", line 399, in setup_models
+snapshot_download(repo_id="ByteDance/LatentSync-1.6",
+File "/root/miniconda3/lib/python3.12/site-packages/huggingface_hub/utils/\_validators.py", line 89, in \_inner_fn
+return fn(*args, \*\*kwargs)
+^^^^^^^^^^^^^^^^^^^
+File "/root/miniconda3/lib/python3.12/site-packages/huggingface_hub/utils/\_http.py", line 276, in \_inner
+return fn(*args, \*\*kwargs)
+^^^^^^^^^^^^^^^^^^^
+File "/root/miniconda3/lib/python3.12/site-packages/huggingface_hub/\_snapshot_download.py", line 400, in snapshot_download
+raise LocalEntryNotFoundError(
+huggingface_hub.errors.LocalEntryNotFoundError: Got: ConnectError: [Errno 99] Cannot assign requested address
+An error happened while trying to locate the files on the Hub, and we cannot find the appropriate snapshot folder for the specified revision on the local disk. Please check your internet connection and try again.
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+File "/root/autodl-tmp/ComfyUI/execution.py", line 501, in execute
+obj = class_def()
+^^^^^^^^^^^
+File "/root/autodl-tmp/ComfyUI/custom_nodes/ComfyUI-LatentSyncWrapper/nodes.py", line 441, in **init**
+setup_models()
+File "/root/autodl-tmp/ComfyUI/custom_nodes/ComfyUI-LatentSyncWrapper/nodes.py", line 422, in setup_models
+raise RuntimeError("Model download failed. See instructions above.")
+RuntimeError: Model download failed. See instructions above.
+
+[INFO] Prompt executed in 276.44 seconds
+[INFO] got prompt
