@@ -618,3 +618,78 @@ prompt2vid "一只戴着安全帽、叼着施工图纸的哈士奇，站在沈�
 export HF_ENDPOINT=https://hf-mirror.com
 export HF_HUB_DISABLE_XET=1
 hf download ByteDance/LatentSync-1.6 --local-dir /root/autodl-tmp/LatentSync-1.6
+
+
+
+There are modules in AutoencoderKL that should be kept in float32: []. Casting directly with `to()` can lead to inconsistent results; set `torch_dtype` in `from_pretrained()` instead to keep these modules in float32.
+There are modules in UNet3DConditionModel that should be kept in float32: []. Casting directly with `to()` can lead to inconsistent results; set `torch_dtype` in `from_pretrained()` instead to keep these modules in float32.
+Error during inference: Face not detected
+Removed temporary file: /tmp/latentsync_0e326ad5/run_czsfu/temp_czsfu.mp4
+Removed temporary file: /tmp/latentsync_0e326ad5/run_czsfu/latentsync_czsfu_audio.wav
+Removed run temporary directory: /tmp/latentsync_0e326ad5/run_czsfu
+Using LatentSync 1.6 config (512x512)
+Input video path: /tmp/latentsync_0e326ad5/run_fyvyt/temp_fyvyt.mp4
+Input audio path: /tmp/latentsync_0e326ad5/run_fyvyt/latentsync_fyvyt_audio.wav
+Loaded checkpoint path: /root/autodl-tmp/ComfyUI/custom_nodes/ComfyUI-LatentSyncWrapper/checkpoints/latentsync_unet.pt
+✓ Created DDIMScheduler directly (fully offline)
+Local VAE not found in any location, creating VAE with standard configuration
+Searched locations: ['/root/autodl-tmp/ComfyUI/custom_nodes/ComfyUI-LatentSyncWrapper/checkpoints/vae/sd-vae-ft-mse.safetensors', '/root/autodl-tmp/ComfyUI/custom_nodes/ComfyUI-LatentSyncWrapper/checkpoints/vae', '/root/autodl-tmp/ComfyUI/custom_nodes/ComfyUI-LatentSyncWrapper/checkpoints/sd-vae-ft-mse.safetensors', '/root/autodl-tmp/ComfyUI/custom_nodes/ComfyUI-LatentSyncWrapper/checkpoints/sd-vae-ft-mse']
+⚠️  Using default VAE configuration - consider downloading VAE model locally for better results
+Initial seed: 1231710186
+video in 25 FPS, audio idx in 50FPS
+Affine transforming 131 faces...
+  0%|          | 0/131 [00:00<?, ?it/s]
+Traceback (most recent call last):
+  File "/root/autodl-tmp/ComfyUI/custom_nodes/ComfyUI-LatentSyncWrapper/nodes.py", line 693, in inference
+    inference_module.main(config, args)
+  File "/root/autodl-tmp/ComfyUI/custom_nodes/ComfyUI-LatentSyncWrapper/scripts/inference.py", line 143, in main
+    pipeline(
+  File "/root/miniconda3/lib/python3.12/site-packages/torch/utils/_contextlib.py", line 124, in decorate_context
+    return func(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "/root/autodl-tmp/ComfyUI/custom_nodes/ComfyUI-LatentSyncWrapper/latentsync/pipelines/lipsync_pipeline.py", line 373, in __call__
+    video_frames, faces, boxes, affine_matrices = self.loop_video(whisper_chunks, video_frames)
+                                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/root/autodl-tmp/ComfyUI/custom_nodes/ComfyUI-LatentSyncWrapper/latentsync/pipelines/lipsync_pipeline.py", line 286, in loop_video
+    faces, boxes, affine_matrices = self.affine_transform_video(video_frames)
+                                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/root/autodl-tmp/ComfyUI/custom_nodes/ComfyUI-LatentSyncWrapper/latentsync/pipelines/lipsync_pipeline.py", line 260, in affine_transform_video
+    face, box, affine_matrix = self.image_processor.affine_transform(frame)
+                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/root/autodl-tmp/ComfyUI/custom_nodes/ComfyUI-LatentSyncWrapper/latentsync/utils/image_processor.py", line 59, in affine_transform
+    raise RuntimeError("Face not detected")
+RuntimeError: Face not detected
+[ERROR] !!! Exception during processing !!! Face not detected
+[ERROR] Traceback (most recent call last):
+  File "/root/autodl-tmp/ComfyUI/execution.py", line 548, in execute
+    output_data, output_ui, has_subgraph, has_pending_tasks = await get_output_data(prompt_id, unique_id, obj, input_data_all, execution_block_cb=execution_block_cb, pre_execute_cb=pre_execute_cb, v3_data=v3_data)
+                                                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/root/autodl-tmp/ComfyUI/execution.py", line 353, in get_output_data
+    return_values = await _async_map_node_over_list(prompt_id, unique_id, obj, input_data_all, obj.FUNCTION, allow_interrupt=True, execution_block_cb=execution_block_cb, pre_execute_cb=pre_execute_cb, v3_data=v3_data)
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/root/autodl-tmp/ComfyUI/execution.py", line 327, in _async_map_node_over_list
+    await process_inputs(input_dict, i)
+  File "/root/autodl-tmp/ComfyUI/execution.py", line 315, in process_inputs
+    result = f(**inputs)
+             ^^^^^^^^^^^
+  File "/root/autodl-tmp/ComfyUI/custom_nodes/ComfyUI-LatentSyncWrapper/nodes.py", line 693, in inference
+    inference_module.main(config, args)
+  File "/root/autodl-tmp/ComfyUI/custom_nodes/ComfyUI-LatentSyncWrapper/scripts/inference.py", line 143, in main
+    pipeline(
+  File "/root/miniconda3/lib/python3.12/site-packages/torch/utils/_contextlib.py", line 124, in decorate_context
+    return func(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "/root/autodl-tmp/ComfyUI/custom_nodes/ComfyUI-LatentSyncWrapper/latentsync/pipelines/lipsync_pipeline.py", line 373, in __call__
+    video_frames, faces, boxes, affine_matrices = self.loop_video(whisper_chunks, video_frames)
+                                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/root/autodl-tmp/ComfyUI/custom_nodes/ComfyUI-LatentSyncWrapper/latentsync/pipelines/lipsync_pipeline.py", line 286, in loop_video
+    faces, boxes, affine_matrices = self.affine_transform_video(video_frames)
+                                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/root/autodl-tmp/ComfyUI/custom_nodes/ComfyUI-LatentSyncWrapper/latentsync/pipelines/lipsync_pipeline.py", line 260, in affine_transform_video
+    face, box, affine_matrix = self.image_processor.affine_transform(frame)
+                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/root/autodl-tmp/ComfyUI/custom_nodes/ComfyUI-LatentSyncWrapper/latentsync/utils/image_processor.py", line 59, in affine_transform
+    raise RuntimeError("Face not detected")
+RuntimeError: Face not detected
+
+[INFO] Prompt executed in 17.98 seconds
