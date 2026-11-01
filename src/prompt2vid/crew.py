@@ -12,6 +12,7 @@ from crewai import Agent, Crew, Process, Task
 
 from .dynamic_llm import build_llm
 from .env_config import load_env
+from .skills import find_skills_dirs, load_catalog, resolve_skills, skills_enabled
 from .style import storyboard_style_hint
 
 # agent 名 → 工具模块列表（prompt2vid.tools 下的模块名）
@@ -120,9 +121,18 @@ def _collect_tools(agent_name: str) -> list:
 
 
 def build_agents(config_dir: Path) -> dict[str, Agent]:
-    """从 config/agents/*.yaml 构建 Agent 实例。"""
+    """从 config/agents/*.yaml 构建 Agent 实例。
+
+    Agent Skills（agentskills.io 标准）从 config/skills/ 发现，按各 agent
+    YAML 的 ``skills:`` 列表挂载。skills 只注入"怎么做"的指令，不提供工具；
+    工具仍由 :func:`_collect_tools` 装配。skills 目录缺失时静默跳过。
+    """
     agents: dict[str, Agent] = {}
     agents_dir = config_dir / "agents"
+    # 全局关闭（PROMPT2VID_SKILLS=off）时直接不挂载，不做校验：
+    # 关闭是应急措施，不能因为 YAML 里仍有 skills 引用而报错。
+    skills_on = skills_enabled()
+    catalog = load_catalog(find_skills_dirs(config_dir)) if skills_on else {}
     for path in sorted(agents_dir.glob("*.yaml")):
         name, spec = next(iter(_load_yaml(path).items()))
         tools = _collect_tools(name)
@@ -132,6 +142,7 @@ def build_agents(config_dir: Path) -> dict[str, Agent]:
             backstory=spec["backstory"],
             llm=build_llm(name),
             tools=tools,
+            skills=resolve_skills(spec.get("skills"), catalog) if skills_on else None,
             verbose=spec.get("verbose", False),
             allow_delegation=spec.get("allow_delegation", False),
             max_iter=spec.get("max_iter", 15),

@@ -12,6 +12,9 @@ douyin_publisher:
     知道发布前必须确认质检报告为 PASS。你严谨对待发布状态：
     每次发布（含 dry-run）都会把 item_id、时间、标题写入状态文件，
     绝不重复发布同一成片，绝不编造发布结果。
+  skills:
+    - name: douyin-metadata-and-compliance
+      always_on: true
   verbose: true
   allow_delegation: false
   max_iter: 5

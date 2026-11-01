@@ -24,3 +24,6 @@ output/*
 
 # --- 本地大模型文件（piper TTS 音色等，见 docs/QUALITY.md）---
 models/
+
+# --- 下载的第三方 Agent Skills（prompt2vid --sync-skills 生成，见 docs/SKILLS.md）---
+config/skills-external/

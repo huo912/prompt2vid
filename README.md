@@ -66,6 +66,26 @@ ComfyUI**（GPU 队列连续执行）、自动重试、写 manifest——不依�
 | 8 | quality_inspector 质检师 | 发起确定性质检并汇报结论 | run_quality_checks（阶段工具） |
 | 9 | douyin_publisher 抖音发布专家 | 撰写标题标签，通过抖音开放平台 API 上传并发布 | DouyinTool |
 
+## Agent Skills（技能包）
+
+4 个创意环节（需求/剧本/分镜/发布）由 LLM 产出，最容易因提示词不规范而翻车。
+这些「该怎么做」的领域知识以 **Agent Skills**（[agentskills.io](https://agentskills.io)
+开放标准，CrewAI 原生支持）的形式放在 `config/skills/`，按 agent YAML 的
+`skills:` 列表挂载；媒体 6 个环节由代码确定性执行，不需要 skill。
+
+内置 8 个：`sdxl-prompt-engineering`、`ltx-motion-prompting`、`character-consistency`、
+`storyboard-schema-guide`、`chinese-short-video-script`、`visual-style-presets`、
+`douyin-metadata-and-compliance`、`delivery-qa-spec`。
+
+```bash
+prompt2vid --list-skills          # 查看内置 + 可下载的 skill 清单
+prompt2vid --sync-skills          # 下载推荐的外部 skill（需网络）
+PROMPT2VID_SKILLS=off prompt2vid "..."   # 应急：一键关闭所有 skill
+```
+
+skills 目录缺失或 `PROMPT2VID_SKILLS=off` 时，行为与引入前完全一致（向后兼容）。
+**详见 [docs/SKILLS.md](docs/SKILLS.md)**：加载机制、`always_on` 取舍、写新 skill 的规范、排错。
+
 ## 项目结构
 
 ```
@@ -75,14 +95,17 @@ prompt2vid/
 ├── Dockerfile                 # 本服务镜像（python:3.11-slim + ffmpeg）
 ├── pyproject.toml
 ├── config/                    # CrewAI 配置（每个 agent / task 一个 YAML）
-│   ├── agents/                # 9 个 agent YAML
-│   └── tasks/                 # 9 个 task YAML
+│   ├── agents/                # 9 个 agent YAML（含 skills: 挂载声明）
+│   ├── tasks/                 # 9 个 task YAML
+│   └── skills/                # 8 个内置 Agent Skill（SKILL.md，见 docs/SKILLS.md）
 ├── deploy/
 │   ├── comfyui/               # ComfyUI GPU 部署（Dockerfile + k8s 清单 + 模型说明）
 │   └── kagent/                # kagent BYO Harness 部署清单（v1alpha3）
 ├── output/                    # 运行输出目录（每次运行一个 run_<时间戳> 子目录）
 ├── src/prompt2vid/
-│   ├── crew.py                # Crew 构建（加载 config/ 下 YAML，装配工具）
+│   ├── crew.py                # Crew 构建（加载 config/ 下 YAML，装配工具与 skills）
+│   ├── skills.py              # Agent Skills 发现/校验/按 agent 挂载（agentskills.io）
+│   ├── skills_sync.py         # 外部 skill 下载（--sync-skills，镜像回退）
 │   ├── main.py                # CLI 入口：python -m prompt2vid.main "描述"
 │   ├── server.py              # A2A 服务器（a2a-sdk，kagent 可调用）+ Web 控制台挂载
 │   ├── pipeline.py            # 流水线编排（crew/直连模式、续跑、清理、run.log）

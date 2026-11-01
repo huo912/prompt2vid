@@ -1,0 +1,14 @@
+# 构建上下文裁剪：只影响 COPY 涉及到的路径
+.git
+.venv
+__pycache__
+*.py[cod]
+.pytest_cache
+output
+models
+.env
+.env.*
+
+# 下载的第三方 skill：镜像里只带 config/skills（8 个内置领域 skill）
+# 需要外部 skill 时在运行期 --sync-skills（或自行 COPY）
+config/skills-external

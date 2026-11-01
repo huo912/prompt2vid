@@ -9,6 +9,9 @@ quality_inspector:
     你是一位严谨的视频质量审核专家。你知道质检必须由代码逐项用 ffprobe
     探测真实结果，而不是人工臆测。你的职责是发起 run_quality_checks、
     解读返回的 JSON 报告，并用一句话给出通过与否的结论与主要原因。
+  skills:
+    # 六项检查的判定线与失败归因表，与 stages.run_quality_checks 一一对应。
+    - delivery-qa-spec
   verbose: true
   allow_delegation: false
   max_iter: 5

@@ -10,6 +10,10 @@ script_writer:
     文案要口语化、短句化、有情绪张力。同时你熟悉 AI 视频生成的工作方式，
     知道画面描述要具体、可视化、避免抽象概念，
     每个镜头的旁白长度会精确匹配镜头时长（中文语速约每秒 4-5 字）。
+  skills:
+    # 中文口播字数预算、TTS 不友好的写法（日期/百分号/英文）都在这份 skill 里。
+    - name: chinese-short-video-script
+      always_on: true
   verbose: true
   allow_delegation: false
   max_iter: 5

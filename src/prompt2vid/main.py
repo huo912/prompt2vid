@@ -18,6 +18,8 @@
     prompt2vid --resume output/run_xxx --only render --force   # 复用产物强制重跑渲染
     prompt2vid --resume output/run_xxx --from render --publish # 断点续跑
     prompt2vid --clean --keep 5                        # 清理旧运行目录
+    prompt2vid --list-skills                           # 查看 Agent Skills（内置 + 可下载）
+    prompt2vid --sync-skills                           # 下载推荐的外部 skill
 """
 
 from __future__ import annotations
@@ -140,6 +142,23 @@ def main(argv: list[str] | None = None) -> int:
         help="续跑完成后执行抖音发布（配合 --resume）",
     )
     parser.add_argument(
+        "--list-skills",
+        action="store_true",
+        help="列出项目内置 skill 与可下载的外部 skill 清单",
+    )
+    parser.add_argument(
+        "--sync-skills",
+        nargs="*",
+        default=None,
+        metavar="NAME",
+        help="下载外部 Agent Skill（不带参数装推荐集；如 --sync-skills skill-creator）",
+    )
+    parser.add_argument(
+        "--skills-force",
+        action="store_true",
+        help="配合 --sync-skills：覆盖已存在的 skill 目录",
+    )
+    parser.add_argument(
         "--clean",
         action="store_true",
         help="清理 output/ 下的旧运行目录（保留最近 --keep 个）",
@@ -188,6 +207,46 @@ def main(argv: list[str] | None = None) -> int:
                 f"（agent: {entry['agent']}{stage}）"
             )
         return 0
+
+    if args.list_skills:
+        from .skills import (
+            default_config_dir,
+            find_skills_dirs,
+            load_catalog,
+            skills_enabled,
+        )
+        from .skills_sync import describe_registry
+
+        print("===== 项目内置 skill（config/skills）=====")
+        if not skills_enabled():
+            print("  ！已通过 PROMPT2VID_SKILLS=off 关闭，agent 不会挂载任何 skill")
+        config_dir = default_config_dir()
+        catalog = load_catalog(find_skills_dirs(config_dir) if config_dir else [])
+        if catalog:
+            for name in sorted(catalog):
+                desc = catalog[name].description.strip().splitlines()[0]
+                print(f"  - {name}: {desc}")
+        else:
+            print("  （无）")
+        print("\n===== 外部 skill（需 --sync-skills 下载）=====")
+        print(describe_registry())
+        return 0
+
+    if args.sync_skills is not None:
+        from .skills_sync import SkillSyncError, sync_skills
+
+        try:
+            report = sync_skills(args.sync_skills or None, force=args.skills_force)
+        except SkillSyncError as exc:
+            print(f"错误: {exc}")
+            return 2
+        print(report.format())
+        if report.installed:
+            print(
+                "提示: 外部 skill 默认不挂载到任何 agent；"
+                "在 config/agents/*.yaml 的 skills: 里引用即可启用。"
+            )
+        return 0 if report.ok else 1
 
     if args.resume:
         run_dir = Path(args.resume).resolve()

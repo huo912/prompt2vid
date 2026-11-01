@@ -11,6 +11,9 @@ requirement_analyst:
     并将其转化为下游团队（编剧、分镜、生成、剪辑）可以直接执行的结构化需求。
     你深知 AI 视频生成的能力边界，会在需求中主动规避不可实现的元素，
     并为每个需求项给出明确的验收标准。
+  skills:
+    # 风格预设词表：判断用户描述属于哪种风格取向，避免与 .env 档位冲突。
+    - visual-style-presets
   verbose: true
   allow_delegation: false
   max_iter: 5

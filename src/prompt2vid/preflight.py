@@ -17,7 +17,9 @@ CLI：prompt2vid "描述" 默认自动预检；也可 `prompt2vid --check-only`
 8. 配音可用性（ComfyUI IndexTTS-2.5 / 网关 / piper 离线 / edge-tts
    至少一条路，非阻断）；
 9. 口型同步节点（LatentSync + VideoHelperSuite；auto 模式缺节点只
-   提示跳过，on 模式缺节点为阻断性配置错误）。
+   提示跳过，on 模式缺节点为阻断性配置错误）；
+10. Agent Skills 目录（config/skills/ 下的 SKILL.md 是否可解析——
+    skills 只是 prompt 增强，缺失或个别非法一律非阻断）。
 """
 
 from __future__ import annotations
@@ -164,6 +166,75 @@ def _append_gpu_checks(
         )
 
 
+def _append_skills_check(checks: list[Check]) -> None:
+    """Agent Skills 目录检查（永远非阻断）。
+
+    skills 只往系统提示里注入方法论，不影响任何可执行能力：目录缺失、
+    个别 SKILL.md 非法都只会降低产出质量，不应该拦住流水线。
+    """
+    from .skills import (
+        default_config_dir,
+        find_skills_dirs,
+        load_catalog,
+        skills_enabled,
+        validate_skills_dirs,
+    )
+
+    if not skills_enabled():
+        checks.append(
+            Check(
+                name="Agent Skills",
+                ok=True,
+                detail="已通过 PROMPT2VID_SKILLS=off 关闭",
+                required=False,
+            )
+        )
+        return
+
+    config_dir = default_config_dir()
+    skills_dirs = find_skills_dirs(config_dir) if config_dir is not None else []
+    if not skills_dirs:
+        checks.append(
+            Check(
+                name="Agent Skills",
+                ok=True,
+                detail="未发现 skills 目录（可选增强，跳过）",
+                hint="如需启用：把 SKILL.md 放到 config/skills/<name>/ 下",
+                required=False,
+            )
+        )
+        return
+
+    names, errors = validate_skills_dirs(skills_dirs)
+    if errors:
+        catalog = load_catalog(skills_dirs)
+        checks.append(
+            Check(
+                name="Agent Skills",
+                ok=False,
+                detail=(
+                    f"{len(catalog)} 个可用，{len(errors)} 个解析失败"
+                    f"（{' + '.join(str(d) for d in skills_dirs)}）"
+                ),
+                hint="；".join(errors[:3]),
+                required=False,
+            )
+        )
+        return
+
+    checks.append(
+        Check(
+            name="Agent Skills",
+            ok=True,
+            detail=(
+                f"{len(names)} 个: {', '.join(names)}"
+                f"（{' + '.join(str(d) for d in skills_dirs)}）"
+            ),
+            required=False,
+        )
+    )
+
+
 def _append_tts_check(
     checks: list[Check],
     comfyui_url: str | None = None,
@@ -302,6 +373,9 @@ def check_environment(
                 hint=f"请安装 {tool} 并加入 PATH（Docker 镜像已内置，本地需自行安装）",
             )
         )
+
+    # 1.5 Agent Skills（非阻断，与 ComfyUI 无关，提前报出）
+    _append_skills_check(checks)
 
     # 2. ComfyUI 可达性（顺便取 system_stats，供 GPU 档位校对）
     comfyui_ok = False

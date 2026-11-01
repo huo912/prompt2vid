@@ -516,6 +516,229 @@ PROMPT2VID_LIPSYNC_CRF=19      # 产物 mp4 质量（越小越清晰）
 > 换页，若 OOM 可重启 ComfyUI 后单独重跑 `sync_lips` 步骤
 > （`prompt2vid --resume output/run_xxx --only sync_lips`）。
 
+### 8.3 常见报错：`TorchCodec is required for save_with_torchcodec`
+
+#### 1）现象与原因
+
+```text
+File ".../ComfyUI-LatentSyncWrapper/nodes.py", line 569, in inference
+    torchaudio.save(audio_path, waveform_cpu, sample_rate)
+File ".../torchaudio/_torchcodec.py", line 248, in save_with_torchcodec
+ImportError: TorchCodec is required for save_with_torchcodec.
+```
+
+- 定位特征：`lipsync/manifest.json` 里**每个镜头都是 `failed`**，成片
+  （`final/final.mp4`）退回原片段、人物嘴不动。
+- 原因：**torchaudio ≥ 2.9 移除了内置 ffmpeg/sox 后端**，所有
+  `torchaudio.save()` / `torchaudio.load()` 一律改走 TorchCodec。租用镜像
+  里的 torchcodec 要么没装，要么与 torch 的版本/ABI 不匹配（装错版本表现为
+  `ImportError: undefined symbol`）。
+- 为什么优先打补丁而不是装 torchcodec：torchcodec 的 wheel 必须与 torch
+  小版本严格对应，且要求系统里有 FFmpeg **共享库**（`libavcodec.so*`，
+  `apt install ffmpeg` 的静态 CLI 不算），在租用镜像上成功率低。而
+  LatentSyncWrapper 只是用它把驱动音频落到临时 `.wav`（随后由 ffmpeg /
+  decord 读回），改用标准库 `wave` 写 PCM16 完全等价。
+
+本仓库自带补丁脚本 `deploy/comfyui/patch_latentsync_audio.py`：把那一行包进
+`try/except`，失败时用标准库写 WAV（自动处理 `(channels, samples)` 转置、
+>2 声道降混），**幂等**（二次运行输出 `[skip] already patched`）、自动备份
+`nodes.py.bak-<时间戳>`，并会用 `[warn]` 标出同文件里其它仍需处理的
+`torchaudio.save/load` 调用。
+
+#### 2）先摸清云机环境（每条都别跳过）
+
+```bash
+ssh -p 40376 root@connect.westb.seetacloud.com '
+  echo "== python ==";  command -v python python3; ls -l /root/miniconda3/bin/python3 2>/dev/null
+  echo "== comfyui =="; ls -ld /root/autodl-tmp/ComfyUI
+  echo "== nodes.py =="; ls -l /root/autodl-tmp/ComfyUI/custom_nodes/ComfyUI-LatentSyncWrapper/nodes.py
+  echo "== process ==";  pgrep -af "main.py"
+'
+```
+
+要点：
+
+- 报错栈里的 `torchaudio` 在 `/root/miniconda3/lib/python3.12/...`，说明
+  ComfyUI 跑在 **conda 环境**里。**非交互式 SSH 不会执行 `.bashrc`**，所以
+  `python3` 常常不在 PATH 里——这就是上一轮 `ssh ... 'python3 xxx.py'` 退出码
+  **127（command not found）** 的原因。后面一律用绝对路径
+  `/root/miniconda3/bin/python3`（若上一步显示别的路径，替换之）。
+- `pgrep -af "main.py"` 的输出**记下来**：重启时要沿用同样的解释器和参数。
+- 若 `nodes.py` 不存在，先确认 ComfyUI 实际目录（可能是 `/root/ComfyUI`
+  或 AutoDL 的 `/root/autodl-tmp/ComfyUI`），后面的路径同步替换。
+
+#### 3）把补丁脚本传到云机（三种方式，任选其一）
+
+```bash
+cd /mnt/work/AI/prompt2vid
+
+# 方式 A（推荐）：用 ssh 流式写入，不需要 scp，也不需要免密
+ssh -p 40376 root@connect.westb.seetacloud.com \
+  'cat > /root/patch_latentsync_audio.py' \
+  < deploy/comfyui/patch_latentsync_audio.py
+
+# 方式 B：scp（注意是大写 -P 指定端口）
+scp -P 40376 deploy/comfyui/patch_latentsync_audio.py \
+  root@connect.westb.seetacloud.com:/root/
+
+# 方式 C：通道全被墙时，直接在云机上手工改
+#   vim /root/autodl-tmp/ComfyUI/custom_nodes/ComfyUI-LatentSyncWrapper/nodes.py
+#   把第 569 行 torchaudio.save(audio_path, waveform_cpu, sample_rate)
+#   换成「try 内保留原调用，except 用 wave 模块写 PCM16」，参考本脚本
+#   的 _replacement() 生成的代码块。
+```
+
+传输后确认落地（避免再次 127/2）：
+
+```bash
+ssh -p 40376 root@connect.westb.seetacloud.com \
+  'ls -l /root/patch_latentsync_audio.py && head -3 /root/patch_latentsync_audio.py'
+```
+
+#### 4）在云机上执行补丁
+
+```bash
+# 不带参数时自动在常见位置找 nodes.py
+ssh -p 40376 root@connect.westb.seetacloud.com \
+  '/root/miniconda3/bin/python3 /root/patch_latentsync_audio.py'
+
+# 自动定位失败时，显式指定
+ssh -p 40376 root@connect.westb.seetacloud.com \
+  '/root/miniconda3/bin/python3 /root/patch_latentsync_audio.py \
+     /root/autodl-tmp/ComfyUI/custom_nodes/ComfyUI-LatentSyncWrapper/nodes.py'
+
+# 顺带体检：找出所有会踩 TorchCodec 的调用点（IndexTTS 等其它节点）
+ssh -p 40376 root@connect.westb.seetacloud.com \
+  '/root/miniconda3/bin/python3 /root/patch_latentsync_audio.py --scan'
+```
+
+预期输出：
+
+```text
+[info] torch = 2.x, torchaudio = 2.x
+[info] torchcodec = MISSING (expected; this patch removes the need)
+[ok] 1 torchaudio.save() call(s) patched in .../nodes.py
+[ok] backup written to .../nodes.py.bak-20261101-193000
+```
+
+退出码含义：`0` 成功或已打过补丁；`1` 没找到目标行（wrapper 版本不同 → 走
+方式 C 手工改）；`2` 找不到 `nodes.py`（路径传错）。
+
+#### 5）校验补丁落地
+
+```bash
+ssh -p 40376 root@connect.westb.seetacloud.com '
+  F=/root/autodl-tmp/ComfyUI/custom_nodes/ComfyUI-LatentSyncWrapper/nodes.py
+  grep -n "prompt2vid fix" -A3 "$F" | head -20
+  /root/miniconda3/bin/python3 -m py_compile "$F" && echo SYNTAX_OK
+'
+```
+
+看到 `prompt2vid fix: torchaudio>=2.9 needs torchcodec` 且 `SYNTAX_OK` 即可。
+
+#### 6）重启 ComfyUI（必须，代码常驻进程）
+
+```bash
+# 1) 记下原启动方式（解释器、参数）
+ssh -p 40376 root@connect.westb.seetacloud.com 'pgrep -af "main.py"'
+
+# 2) 停掉旧进程
+ssh -p 40376 root@connect.westb.seetacloud.com 'pkill -f "ComfyUI/main.py"'
+
+# 3) 用原来的参数重启（示例；参数照抄上一步的输出）
+ssh -p 40376 root@connect.westb.seetacloud.com \
+  'cd /root/autodl-tmp/ComfyUI && \
+   nohup /root/miniconda3/bin/python3 main.py --listen 127.0.0.1 --port 8188 \
+     > comfyui.log 2>&1 &'
+
+# 4) 看日志有没有报错（插件加载失败会打印 Traceback）
+ssh -p 40376 root@connect.westb.seetacloud.com \
+  'tail -n 40 /root/autodl-tmp/ComfyUI/comfyui.log'
+```
+
+> 若平台用自带「自定义服务/启动脚本」拉起的 ComfyUI，请用控制台的重启按钮，
+> 或改脚本后再启动；从 SSH 手工 `pkill` + `nohup` 会有两个实例抢显存的风险，
+> 重启前务必确认 `pgrep -af main.py` 只剩一个进程。
+
+本地（隧道这侧）验证服务已换上新代码：
+
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8188/system_stats   # 200
+curl -s http://127.0.0.1:8188/object_info/LatentSyncNode | head -c 200        # 有 JSON
+```
+
+#### 7）本地断点续跑：只补口型同步 + 重渲染
+
+```bash
+cd /mnt/work/AI/prompt2vid
+source .venv/bin/activate
+export COMFYUI_URL=http://127.0.0.1:8188     # 与 .env.4090 一致即可
+
+# 6 个镜头逐个跑 LatentSync（每镜约 2–6 分钟），ssh 隧道断开会中途失败，
+# 建议后台跑并留日志
+prompt2vid --resume output/run_20261101_185858 --only sync_lips --env-file 4090 \
+  2>&1 | tee /tmp/lipsync_retry.log
+
+# 成功后重渲染 + 质检（render 会优先用 lipsync/ 产物）
+prompt2vid --resume output/run_20261101_185858 \
+  --only edit_video,inspect_quality --env-file 4090
+```
+
+说明：
+
+- `sync_lips` 会**跳过已存在的 `lipsync/shot_*.mp4`**、自动重试之前失败的
+  镜头，因此**不需要 `--force`**（`--force` 会先删掉 `lipsync/` 整个目录）。
+- 想一口气跑完三个阶段也可以用 `--from lipsync`
+  （顺序：lipsync → render → quality）。
+- 结果核对：
+
+```bash
+python3 - <<'PY'
+import json
+m = json.load(open('output/run_20261101_185858/lipsync/manifest.json'))
+for s in m['shots']:
+    print(s['id'], s['status'], (s.get('error') or '')[:120])
+r = json.load(open('output/run_20261101_185858/final/render_report.json'))
+print('lipsync 生效镜头:', r['lipsync'])
+PY
+```
+
+`manifest.json` 里 `status=ok` 的镜头数 = `render_report.json` 的
+`lipsync.shots` 数，成片里这些镜头说话时嘴部应与配音对齐。
+
+#### 8）如果补丁后仍然失败
+
+| 症状 | 原因 / 处理 |
+|------|-------------|
+| 还是完全相同的 TorchCodec 栈 | ComfyUI 没重启；或云机上有**多个** ComfyUI（`pgrep -af main.py`、`ss -ltnp \| grep 8188`）；或用 `--scan` 确认改的是真正在跑的那个 `custom_nodes` 目录 |
+| `ssh` 退出码 **127** | 非交互 shell 无 conda PATH → 用绝对路径 `/root/miniconda3/bin/python3` |
+| 退出码 **2** + `can't open file` | 脚本没传上去 → 重做第 3 步并 `ls -l` 确认 |
+| 退出码 **1** + `no 'torchaudio.save(...)' line` | wrapper 版本不同 → 按方式 C 手工改 |
+| `ImportError: undefined symbol` | 装 torchcodec 装错版本（ABI 不匹配）→ 卸载后回到补丁方案 |
+| 补丁成功、仍有个别镜头 `failed`，错误里没有 TorchCodec | 正常：**无正脸/侧脸/动漫脸**无法驱动唇形。`.env.4090` 是 anime 风格，卡通哈士奇大概率全部失败——这属于能力边界，不是故障；要口型生效需 `PROMPT2VID_STYLE=realistic` 且分镜里有清晰正脸 |
+| 口型产物有了但成片没变 | 没重跑 `render`：`prompt2vid --resume <run> --only edit_video --env-file 4090` |
+| 想彻底关掉该阶段 | `.env` 设 `PROMPT2VID_LIPSYNC=off`，流水线直接跳过、不报错 |
+
+#### 9）替代方案：装上 torchcodec（仅在补丁不可行时）
+
+```bash
+ssh -p 40376 root@connect.westb.seetacloud.com '
+  /root/miniconda3/bin/python3 -c "import torch; print(torch.__version__)"
+  /root/miniconda3/bin/python3 -c "import torchaudio; print(torchaudio.__version__)"
+  ldconfig -p | grep -c libavcodec          # 必须是 >=1（共享库，静态 CLI 不算）
+  /root/miniconda3/bin/python3 -m pip install -v torchcodec
+  /root/miniconda3/bin/python3 -c "import torchcodec; print(torchcodec.__version__)"
+'
+```
+
+版本必须与 torch 一一对应（对应关系见 torchcodec 仓库 README 的兼容表，
+例如 torch 2.8 → torchcodec 0.7）。`import torchcodec` 失败而 `pip` 又要求
+升级 torch 时，**不要动 torch**（会连带破坏 ComfyUI 的 CUDA 轮子）——回到
+补丁方案。
+
+> 其它自定义节点（IndexTTS 等）若报同样的 Traceback，同理处理：所有
+> `torchaudio.save(...)` 调用都需要绕过 TorchCodec。
+
 ---
 
 ## 9. 可选模型替换（非必需）

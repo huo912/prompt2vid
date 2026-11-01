@@ -1,0 +1,26 @@
+{
+  "characters": [
+    {
+      "id": 1,
+      "name": "小满",
+      "description": "a 24-year-old slim woman, oval face, fair skin with light freckles, shoulder-length straight black hair with side bangs, cream knit sweater, dark blue jeans, round silver glasses, small gold hoop earrings, a small mole under her left eye"
+    },
+    {
+      "id": 2,
+      "name": "老周",
+      "description": "a 58-year-old heavyset man, square face, tanned weathered skin, short grey buzz cut, faded olive green work jacket, dark grey trousers, black-framed reading glasses, a silver watch on his right wrist"
+    }
+  ],
+  "shots": [
+    {
+      "id": 1,
+      "characters": [1],
+      "narration": "秋天的第一杯热咖啡，要配一整条银杏路。",
+      "visual": "小满挎着布袋走在落满银杏的公园小径上，手里捧着冒热气的纸杯",
+      "image_prompt": "a 24-year-old slim woman, oval face, fair skin with light freckles, shoulder-length straight black hair with side bangs, cream knit sweater, dark blue jeans, round silver glasses, small gold hoop earrings, a small mole under her left eye, walking on a park path holding a steaming paper cup, scattered ginkgo leaves on the ground, medium close-up, vertical composition, soft afternoon light, muted warm palette",
+      "motion_prompt": "slow zoom in, she gently blinks, steam rises from the cup, ginkgo leaves fall slowly",
+      "duration_seconds": 4
+    }
+  ],
+  "total_duration_seconds": 4
+}
