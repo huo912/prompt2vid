@@ -313,3 +313,108 @@ def test_render_final_transitions_between_shots(render_workspace, monkeypatch):
     srt = (render_workspace / "final" / "final.srt").read_text(encoding="utf-8")
     assert "00:00:00,000 --> 00:00:02,000" in srt
     assert "00:00:02,000 --> 00:00:05,000" in srt
+
+
+# ------------------------------------------------------------ 台词字幕
+
+
+def _dialogue_workspace(ws: Path, lines: list[dict] | None = None,
+                        speaker_suffix: str = "") -> Path:
+    """把 render_workspace 改成「镜 1 有台词行、镜 2 只有旁白」。"""
+    storyboard = {
+        "characters": [
+            {"id": 1, "name": "玉皇大帝", "description": "an old emperor"},
+            {"id": 2, "name": "老者", "description": "an old servant"},
+        ],
+        "shots": [
+            {
+                "id": 1,
+                "characters": [1, 2],
+                "image_prompt": "palace hall, an old emperor, an old servant",
+                "motion_prompt": "the character is speaking",
+                "duration_seconds": 2,
+                "dialogue": [
+                    {"speaker": 1, "text": f"你们这届凡人{speaker_suffix}"},
+                    {"speaker": 2, "text": "陛下，人间变天了"},
+                ],
+            },
+            {
+                "id": 2,
+                "narration": "第二镜旁白",
+                "image_prompt": "night sky",
+                "motion_prompt": "slow zoom",
+                "duration_seconds": 3,
+            },
+        ],
+    }
+    (ws / "storyboard.json").write_text(
+        json.dumps(storyboard, ensure_ascii=False), encoding="utf-8"
+    )
+    audio = ws / "audio" / "shot_1.mp3"
+    (ws / "audio" / "manifest.json").write_text(
+        json.dumps({"shots": [
+            {
+                "id": 1, "audio": "audio/shot_1.mp3", "status": "ok", "path": str(audio),
+                "dialogue": True,
+                "lines": lines if lines is not None else [
+                    {"index": 1, "speaker": 1, "name": "玉皇大帝",
+                     "text": f"你们这届凡人{speaker_suffix}", "start": 0.0, "end": 1.2},
+                    {"index": 2, "speaker": 2, "name": "老者",
+                     "text": "陛下，人间变天了", "start": 1.4, "end": 2.0},
+                ],
+            },
+        ]}, ensure_ascii=False), encoding="utf-8",
+    )
+    return ws
+
+
+def test_render_final_subtitles_follow_dialogue_lines(render_workspace, monkeypatch):
+    """台词行各自成条字幕（用 manifest 的行起止时间），旁白镜头保持单条。"""
+    ws = _dialogue_workspace(render_workspace)
+    _install_ffmpeg_mocks(
+        monkeypatch, clip_durations={1: 2.0, 2: 3.0}, audio_durations={1: 2.0}
+    )
+
+    report = stages.render_final()
+
+    assert "error" not in report, report
+    srt = (ws / "final" / "final.srt").read_text(encoding="utf-8")
+    assert "00:00:00,000 --> 00:00:01,200\n你们这届凡人" in srt
+    assert "00:00:01,400 --> 00:00:02,000\n陛下，人间变天了" in srt
+    # 第二镜无台词行 → 回退整镜旁白一条字幕（保持旧行为）
+    assert "00:00:02,000 --> 00:00:05,000\n第二镜旁白" in srt
+
+
+def test_render_final_subtitle_speaker_prefix(render_workspace, monkeypatch):
+    """PROMPT2VID_SUBTITLE_SPEAKER=on：字幕带角色名（旁白不加）。"""
+    ws = _dialogue_workspace(render_workspace)
+    monkeypatch.setenv("PROMPT2VID_SUBTITLE_SPEAKER", "on")
+    _install_ffmpeg_mocks(
+        monkeypatch, clip_durations={1: 2.0, 2: 3.0}, audio_durations={1: 2.0}
+    )
+
+    stages.render_final()
+
+    srt = (ws / "final" / "final.srt").read_text(encoding="utf-8")
+    assert "玉皇大帝：你们这届凡人" in srt
+    assert "老者：陛下，人间变天了" in srt
+
+
+def test_render_final_line_timings_clamped_to_shot(render_workspace, monkeypatch):
+    """行时间轴逸出镜长时被夹住，不与下一镜字幕重叠。"""
+    ws = _dialogue_workspace(render_workspace, lines=[
+        {"index": 1, "speaker": 1, "name": "玉皇大帝", "text": "你们这届凡人",
+         "start": 0.0, "end": 1.2},
+        {"index": 2, "speaker": 2, "name": "老者", "text": "陛下，人间变天了",
+         "start": 1.4, "end": 9.0},
+    ])
+    _install_ffmpeg_mocks(
+        monkeypatch, clip_durations={1: 2.0, 2: 3.0}, audio_durations={1: 2.0}
+    )
+
+    stages.render_final()
+
+    srt = (ws / "final" / "final.srt").read_text(encoding="utf-8")
+    assert "00:00:01,400 --> 00:00:02,000" in srt
+    assert "00:00:09,000" not in srt
+

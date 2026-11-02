@@ -11,6 +11,11 @@ markdown 代码栅栏包裹。本模块做"宽容输入"处理：
 - 每镜 characters 引用未定义角色 → 忽略该标记并记录修复项；
 - 出场角色的 description 未逐字出现在 image_prompt → 代码兜底补入
   （仅内存修复，不改写 storyboard.json），保证文本条件跨镜一致。
+
+角色对白（每镜 dialogue 台词行）：
+- 每行 {speaker, text}，speaker 可写角色 id、角色名或「旁白」；
+- 未定义的发言人一律降级为旁白并记录修复项，不阻塞出片；
+- 没有 dialogue 的旧分镜自动用 narration 作为唯一旁白行（完全兼容）。
 """
 
 from __future__ import annotations
@@ -27,6 +32,14 @@ MIN_SHOT_SECONDS = 1.0
 MAX_SHOT_SECONDS = 10.0
 DEFAULT_SHOT_SECONDS = 4.0
 DEFAULT_MOTION_PROMPT = "subtle motion, gentle camera drift"
+
+# 旁白行的发言人 id（角色 id 从 1 开始，0 专门表示旁白/画外音）
+NARRATOR_ID = 0
+# 发言人写这些字样时按旁白处理
+NARRATOR_ALIASES = {
+    "", "旁白", "旁白/画外音", "画外音", "解说", "叙述",
+    "narrator", "narration", "voiceover", "voice-over", "none", "null",
+}
 
 
 class StoryboardError(RuntimeError):
@@ -45,6 +58,27 @@ class Character:
     id: int
     name: str
     description: str
+    # 音色（可选）：voice 给 edge-tts 用（如 zh-CN-YunxiNeural），
+    # timbre 给 ComfyUI IndexTTS-2.5 用（插件 TimbreModel 目录里的文件名）。
+    # 留空时由 tts 按角色 id 在默认音色表里轮转分配，保证不同角色不同声线。
+    voice: str = ""
+    timbre: str = ""
+
+
+@dataclass
+class Line:
+    """一句台词（或一句旁白）。
+
+    speaker 是角色 id，0 表示旁白；name 是角色的中文名（写字幕前缀用）。
+    """
+
+    speaker: int
+    text: str
+    name: str = ""
+
+    @property
+    def is_narration(self) -> bool:
+        return self.speaker == NARRATOR_ID
 
 
 @dataclass
@@ -59,6 +93,24 @@ class Shot:
     duration_seconds: float
     characters: list[int] = field(default_factory=list)
     fixes: list[str] = field(default_factory=list)
+    # 有序台词行；空列表 = 使用 narration 作为唯一旁白（旧分镜兼容）
+    dialogue: list[Line] = field(default_factory=list)
+
+    @property
+    def has_dialogue(self) -> bool:
+        return bool(self.dialogue)
+
+    def spoken_lines(self) -> list[Line]:
+        """本镜要念出来的文本行（按播放顺序）。
+
+        有 dialogue 就用 dialogue；否则回退到 narration 单行旁白。
+        这样旧 storyboard 与「整片只有旁白」的形态完全不变。
+        """
+        if self.dialogue:
+            return list(self.dialogue)
+        if self.narration:
+            return [Line(speaker=NARRATOR_ID, text=self.narration)]
+        return []
 
 
 def extract_json_value(text: str) -> object:
@@ -132,8 +184,94 @@ def _normalize_characters(raw: object) -> dict[int, Character]:
             id=cid,
             name=str(item.get("name") or "").strip(),
             description=description,
+            voice=str(item.get("voice") or "").strip(),
+            timbre=str(item.get("timbre") or "").strip(),
         )
     return characters
+
+
+def _resolve_speaker(
+    raw: object, characters: dict[int, Character], fixes: list[str]
+) -> int:
+    """把台词发言人规范化为角色 id（0 = 旁白）。
+
+    LLM 可能写角色 id（1）、角色名（"玉皇大帝"）、"旁白"，甚至写个不存在的
+    名字。无法识别时一律降级为旁白并记修复项——宁可整段念出来，也不要
+    因为一个字段写错导致整镜无音。
+    """
+    if raw is None or isinstance(raw, bool):
+        return NARRATOR_ID
+    if isinstance(raw, (int, float)):
+        cid = _to_int(raw, 0)
+        if cid == NARRATOR_ID or cid in characters:
+            return cid
+        fixes.append(f"台词发言人 {raw} 未在 characters 定义，按旁白处理")
+        return NARRATOR_ID
+
+    text = str(raw).strip()
+    lowered = text.lower().lstrip("@#")
+    if lowered in NARRATOR_ALIASES:
+        return NARRATOR_ID
+    if lowered.isdigit():
+        cid = int(lowered)
+        if cid == NARRATOR_ID or cid in characters:
+            return cid
+    for cid, character in characters.items():
+        if character.name and character.name == text:
+            return cid
+    fixes.append(f"台词发言人“{text}”未在 characters 定义，按旁白处理")
+    return NARRATOR_ID
+
+
+def _split_speaker_text(text: str, characters: dict[int, Character]) -> tuple[object, str]:
+    """从 "角色名：台词" / "角色名: 台词" 里拆出（发言人, 台词）。
+
+    只在冒号左边确实是一个已定义角色名或「旁白」时才拆，避免把台词里
+    正常的冒号误切成发言人。
+    """
+    for sep in ("：", ":"):
+        if sep not in text:
+            continue
+        head, body = text.split(sep, 1)
+        head = head.strip()
+        body = body.strip()
+        if not body:
+            continue
+        if head.lower() in NARRATOR_ALIASES:
+            return NARRATOR_ID, body
+        if any(c.name and c.name == head for c in characters.values()):
+            return head, body
+    return None, text.strip()
+
+
+def _normalize_dialogue(
+    raw: object, characters: dict[int, Character], fixes: list[str]
+) -> list[Line]:
+    """宽容解析每镜 dialogue：支持对象数组与 "角色名：台词" 字符串数组。"""
+    if isinstance(raw, dict):
+        raw = [raw]
+    if not isinstance(raw, list):
+        return []
+
+    lines: list[Line] = []
+    for item in raw:
+        speaker_raw: object = None
+        text = ""
+        if isinstance(item, str):
+            speaker_raw, text = _split_speaker_text(item, characters)
+        elif isinstance(item, dict):
+            text = str(
+                item.get("text") or item.get("line") or item.get("content") or ""
+            ).strip()
+            speaker_raw = item.get(
+                "speaker", item.get("character", item.get("role", item.get("name")))
+            )
+        if not text:
+            continue
+        speaker = _resolve_speaker(speaker_raw, characters, fixes)
+        name = characters[speaker].name if speaker in characters else ""
+        lines.append(Line(speaker=speaker, text=text, name=name))
+    return lines
 
 
 def _normalize_shot(
@@ -166,6 +304,9 @@ def _normalize_shot(
         motion_prompt = DEFAULT_MOTION_PROMPT
         fixes.append("motion_prompt 缺失，使用默认运动描述")
 
+    # 台词行：speaker 支持 id / 角色名 / 旁白；解析不了的降级为旁白
+    dialogue = _normalize_dialogue(item.get("dialogue"), characters, fixes)
+
     # 角色一致性契约：出场角色的外观描述必须逐字出现在 image_prompt。
     # LLM 漏写时代码兜底补入（不修改 storyboard.json 文件，仅内存修复）。
     shot_characters: list[int] = []
@@ -183,6 +324,11 @@ def _normalize_shot(
         image_prompt = f"{image_prompt}, {appended}"
         fixes.append(f"image_prompt 补入角色 {missing} 的外观描述")
 
+    if not image_prompt and dialogue:
+        # 只有台词的镜头也要有画面：用台词原文兜底（仅防丢镜）
+        image_prompt = " ".join(line.text for line in dialogue)
+        fixes.append("image_prompt 缺失，回落到台词文本")
+
     if not (image_prompt or narration):
         return None
 
@@ -195,6 +341,7 @@ def _normalize_shot(
         duration_seconds=duration,
         characters=shot_characters,
         fixes=fixes,
+        dialogue=dialogue,
     )
 
 

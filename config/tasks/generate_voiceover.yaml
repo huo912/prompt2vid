@@ -2,10 +2,17 @@ generate_voiceover:
   description: >-
     为分镜表（storyboard.json）中每个分镜生成中文配音。
     直接调用 generate_voiceovers 工具（无需任何参数）：该工具会自动读取
-    工作目录的 storyboard.json，逐镜用 edge-tts 合成中文配音
-    （音色 zh-CN-XiaoxiaoNeural，可用环境变量覆盖；edge-tts 不可用时自动
-    回退），输出 audio/shot_<id>.mp3，并把真实结果清单写入
+    工作目录的 storyboard.json，逐镜合成中文配音，并把真实结果清单写入
     audio/manifest.json。
+    配音按台词行走：分镜里写了 dialogue 时，每句台词单独合成（说话角色用
+    自己角色卡上的 voice/timbre 音色，不同角色不同嗓子），再按顺序拼接成
+    该镜音轨（句间留 0.25 秒停顿，可用 PROMPT2VID_DIALOGUE_GAP 调整）；
+    没有 dialogue 的镜头按 narration 配一条旁白。
+    引擎链：IndexTTS-2.5（ComfyUI）→ edge-tts → 网关 → piper → 静音占位，
+    不可用时自动回退。
+    产物：audio/shot_<id>.mp3（该镜完整音轨，供口型同步与剪辑）+
+    audio/shot_<id>_line_<n>.mp3（逐句片段），manifest 每镜含
+    lines 行时间轴（speaker/name/text/start/end），供字幕使用。
     调用完成后，把工具返回的 JSON 汇总原样作为你的最终回答，
     可附一句简短结论。
     不要自己逐镜调用工具，不要手工编写 manifest。

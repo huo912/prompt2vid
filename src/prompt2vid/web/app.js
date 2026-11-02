@@ -254,11 +254,28 @@ async function renderStoryboard(box, d) {
         }
       }
     } catch (e) { /* 首帧未生成时无缩略图 */ }
+    // 台词行：speaker 是角色 id，转成角色名显示（0 / 缺省 = 旁白）
+    const charName = {};
+    for (const c of sb.characters || []) {
+      if (c && c.id !== undefined) charName[String(c.id)] = c.name || `#${c.id}`;
+    }
+    const dialogueCell = (s) => {
+      const lines = Array.isArray(s.dialogue) ? s.dialogue : [];
+      if (!lines.length) return '<span class="hint">旁白</span>';
+      return lines.map((line) => {
+        if (!line) return "";
+        const raw = line.speaker;
+        const who = (raw === 0 || raw === undefined || raw === null || raw === "旁白")
+          ? "旁白" : (charName[String(raw)] || String(raw));
+        return `<div><b>${escapeHtml(who)}</b>：${escapeHtml(line.text || "")}</div>`;
+      }).join("");
+    };
     const rows = (sb.shots || []).map((s) => `
       <tr>
         <td>#${s.id}</td>
         <td><img loading="lazy" src="/api/runs/${d.id}/files/frames/${encodeURIComponent(imgName[s.id] || `shot_${s.id}.png`)}"
              onerror="this.style.display='none'"></td>
+        <td>${dialogueCell(s)}</td>
         <td>${escapeHtml(s.narration || "")}</td>
         <td>${escapeHtml(s.visual || "")}</td>
         <td>${s.duration_seconds ?? "?"}s</td>
@@ -268,7 +285,7 @@ async function renderStoryboard(box, d) {
         <summary>🎞 分镜 storyboard.json <span class="sub">共 ${sb.shots?.length ?? 0} 镜 / ${escapeHtml(String(sb.total_duration_seconds ?? "?"))}s</span></summary>
         <div class="artifact-body">
           <table class="storyboard-table">
-            <thead><tr><th>镜</th><th>首帧</th><th>旁白</th><th>画面</th><th>时长</th></tr></thead>
+            <thead><tr><th>镜</th><th>首帧</th><th>台词</th><th>旁白</th><th>画面</th><th>时长</th></tr></thead>
             <tbody>${rows}</tbody>
           </table>
         </div>

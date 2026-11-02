@@ -44,6 +44,7 @@ from .comfyui_client import (
 )
 from .storyboard import (
     Character,
+    Line,
     Shot,
     StoryboardError,
     extract_json,
@@ -449,15 +450,29 @@ def generate_clips(workspace: str | Path | None = None) -> dict:
 
 
 def generate_voiceovers(workspace: str | Path | None = None) -> dict:
-    """阶段 3：为每个分镜生成中文配音（edge-tts，失败自动回退）。"""
+    """阶段 3：为每个分镜生成中文配音（逐行台词 + 分角色音色）。
+
+    分镜写了 dialogue 时逐行合成（每行用该角色自己的音色/音库），
+    再按顺序拼接成该镜音轨，句间插入短暂停顿；manifest 记录每行的
+    起止时间，渲染阶段据此生成多行字幕。没有 dialogue 的旧分镜
+    仍然走「一镜一条旁白」的老路径（完全兼容）。
+    """
     ws = workspace_root(workspace)
     try:
         shots = load_storyboard(ws / STORYBOARD_FILE)
+        characters = load_characters(ws / STORYBOARD_FILE)
     except StoryboardError as exc:
         return {"stage": "voiceovers", "error": str(exc)}
 
     entries: list[dict] = []
     for shot in shots:
+        if shot.has_dialogue:
+            try:
+                entries.append(_voiceover_dialogue(ws, shot, characters))
+            except Exception as exc:  # noqa: BLE001 - 单镜失败不影响其它镜头
+                entries.append(_failed_entry(shot.id, str(exc)))
+            continue
+
         dest = ws / AUDIO_DIR / f"shot_{shot.id}.mp3"
         if dest.is_file() and dest.stat().st_size > 0:
             entries.append(_ok_entry(shot.id, "audio", f"{AUDIO_DIR}/shot_{shot.id}.mp3", dest))
@@ -471,6 +486,63 @@ def generate_voiceovers(workspace: str | Path | None = None) -> dict:
     manifest_rel = f"{AUDIO_DIR}/manifest.json"
     _write_json(ws / manifest_rel, {"shots": entries})
     return _summary("voiceovers", entries, manifest_rel)
+
+
+def _line_voice(character: Character | None, speaker: int) -> tuple[str, str]:
+    """解析某句台词的（edge 音色, IndexTTS 音库）。
+
+    角色卡显式写了就用卡上的；没写则按角色 id 在默认声线表里轮转，
+    保证同一部片子里不同角色不是同一个嗓子。旁白保持全局音色。
+    """
+    voice = character.voice if character and character.voice else tts.voice_for_speaker(speaker)
+    timbre = character.timbre if character and character.timbre else tts.timbre_for_speaker(speaker)
+    return voice, timbre
+
+
+def _voiceover_dialogue(
+    ws: Path, shot: Shot, characters: dict[int, Character]
+) -> dict:
+    """逐行合成台词并拼成该镜音轨，返回带行时间轴的 manifest 条目。"""
+    gap = max(0.0, env_float("PROMPT2VID_DIALOGUE_GAP", 0.25))
+    line_paths: list[Path] = []
+    rebuilt = False
+    for index, line in enumerate(shot.dialogue, start=1):
+        dest = ws / AUDIO_DIR / f"shot_{shot.id}_line_{index}.mp3"
+        if not (dest.is_file() and dest.stat().st_size > 0):
+            voice, timbre = _line_voice(characters.get(line.speaker), line.speaker)
+            tts.synthesize_audio(
+                text=line.text, dest=dest, voice=voice, timbre=timbre
+            )
+            rebuilt = True
+        line_paths.append(dest)
+
+    durations = [ffmpeg_ops.audio_duration(path) for path in line_paths]
+    lines_info: list[dict] = []
+    cursor = 0.0
+    for index, (line, path, seconds) in enumerate(
+        zip(shot.dialogue, line_paths, durations), start=1
+    ):
+        end = cursor + seconds
+        lines_info.append({
+            "index": index,
+            "speaker": line.speaker,
+            "name": line.name,
+            "text": line.text,
+            "path": f"{AUDIO_DIR}/{path.name}",
+            "seconds": round(seconds, 3),
+            "start": round(cursor, 3),
+            "end": round(end, 3),
+        })
+        cursor = end + gap
+
+    shot_audio = ws / AUDIO_DIR / f"shot_{shot.id}.mp3"
+    if rebuilt or not (shot_audio.is_file() and shot_audio.stat().st_size > 0):
+        ffmpeg_ops.concat_audio(line_paths, shot_audio, gap_seconds=gap)
+
+    entry = _ok_entry(shot.id, "audio", f"{AUDIO_DIR}/shot_{shot.id}.mp3", shot_audio)
+    entry["dialogue"] = True
+    entry["lines"] = lines_info
+    return entry
 
 
 @dataclass
@@ -636,6 +708,50 @@ def sync_lips(workspace: str | Path | None = None) -> dict:
     return summary
 
 
+def _shot_line_timings(
+    shot: Shot | None,
+    audio_entry: dict | None,
+    offset: float,
+    shot_seconds: float,
+    with_speaker: bool,
+) -> list[tuple[float, float, str]]:
+    """把一镜的台词行换成绝对时间轴字幕条目。
+
+    首选配音清单里的行起止时间（真实的逐行合成结果）；没有行信息时
+    回退到该镜 narration 一条字幕（旧行为）。字幕被夹在本镜时间区间
+    内，防止时间轴逸出去与下一镜重叠。
+    """
+    if shot is None:
+        return []
+    lines = shot.spoken_lines()
+    if not lines:
+        return []
+    raw = (audio_entry or {}).get("lines")
+    if not isinstance(raw, list) or len(raw) < len(lines):
+        return []
+
+    by_index = {
+        int(item.get("index", 0)): item
+        for item in raw
+        if isinstance(item, dict)
+    }
+    timings: list[tuple[float, float, str]] = []
+    for index, line in enumerate(lines, start=1):
+        item = by_index.get(index)
+        if not item:
+            continue
+        start = offset + max(0.0, float(item.get("start", 0.0) or 0.0))
+        end = offset + float(item.get("end", 0.0) or 0.0)
+        if end <= start:
+            continue
+        end = min(end, offset + shot_seconds)
+        text = line.text
+        if with_speaker and not line.is_narration and line.name:
+            text = f"{line.name}：{text}"
+        timings.append((start, end, text))
+    return timings
+
+
 def _bgm_path() -> Path | None:
     """可选背景音乐（PROMPT2VID_BGM 指向音频文件时启用，循环低音量混入）。"""
     raw = env_str("PROMPT2VID_BGM", "")
@@ -658,13 +774,17 @@ def render_final(workspace: str | Path | None = None) -> dict:
     except (FileNotFoundError, ValueError) as exc:
         return {"stage": "render", "error": f"缺少视频片段清单: {exc}"}
     try:
-        audios = {
-            int(a.get("id", 0)): resolve_in_workspace(a.get("path", a.get("audio", "")), ws)
+        audio_entries: dict[int, dict] = {
+            int(a.get("id", 0)): a
             for a in read_manifest(ws / AUDIO_DIR / "manifest.json")
             if a.get("status") in (None, "ok")
         }
     except (FileNotFoundError, ValueError):
-        audios = {}
+        audio_entries = {}
+    audios = {
+        shot_id: resolve_in_workspace(entry.get("path", entry.get("audio", "")), ws)
+        for shot_id, entry in audio_entries.items()
+    }
     try:
         storyboard = {s.id: s for s in load_storyboard(ws / STORYBOARD_FILE)}
     except StoryboardError:
@@ -752,9 +872,18 @@ def render_final(workspace: str | Path | None = None) -> dict:
         fitted_audio.append(fitted)
 
         shot = storyboard.get(shot_id)
-        narration = shot.narration if shot else ""
-        if narration:
-            timings.append((cursor, cursor + effective, narration))
+        with_speaker = env_str("PROMPT2VID_SUBTITLE_SPEAKER", "").lower() in (
+            "on", "1", "true", "yes",
+        )
+        line_timings = _shot_line_timings(
+            shot, audio_entries.get(shot_id), cursor, effective, with_speaker
+        )
+        if line_timings:
+            timings.extend(line_timings)
+        else:
+            narration = shot.narration if shot else ""
+            if narration:
+                timings.append((cursor, cursor + effective, narration))
         cursor += effective
 
     # 过渡不能吃掉镜头本体：按最短镜头的一半时长封顶

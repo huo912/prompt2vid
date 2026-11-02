@@ -480,6 +480,127 @@ def test_generate_voiceovers_writes_manifest(tmp_path, monkeypatch):
     assert Path(manifest["shots"][1]["path"]).is_file()
 
 
+DIALOGUE_STORYBOARD = {
+    "characters": [
+        {"id": 1, "name": "玉皇大帝", "description": "an old emperor in golden robes",
+         "voice": "zh-CN-YunjianNeural"},
+        {"id": 2, "name": "老者", "description": "an old servant in grey robe"},
+    ],
+    "shots": [
+        {
+            "id": 1,
+            "characters": [1, 2],
+            "visual": "大殿对坐",
+            "image_prompt": "palace hall, an old emperor in golden robes, "
+                            "an old servant in grey robe",
+            "motion_prompt": "the character is speaking, lips moving naturally",
+            "duration_seconds": 4,
+            "dialogue": [
+                {"speaker": 1, "text": "你们这届凡人，有点意思。"},
+                {"speaker": "老者", "text": "陛下，人间已经变天了。"},
+            ],
+        },
+        {
+            "id": 2,
+            "narration": "三千年前，他也说过这句话。",
+            "visual": "夜空",
+            "image_prompt": "night sky",
+            "motion_prompt": "slow zoom",
+            "duration_seconds": 3,
+        },
+    ],
+    "total_duration_seconds": 7,
+}
+
+
+def test_generate_voiceovers_dialogue_per_character(tmp_path, monkeypatch):
+    """有 dialogue：逐句合成（各用角色音色）→ 拼接成整镜音轨 + 行时间轴。"""
+    ws = _setup_workspace(tmp_path, monkeypatch, storyboard=DIALOGUE_STORYBOARD)
+    monkeypatch.setenv("PROMPT2VID_DIALOGUE_GAP", "0.5")
+
+    calls: list[dict] = []
+
+    def fake_tts(text, dest, **kwargs):
+        calls.append({"text": text, "dest": Path(dest), **kwargs})
+        dest = Path(dest)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(b"mp3-fake")
+        return dest
+
+    concatenated: list[list[str]] = []
+
+    def fake_concat(items, dest, **kwargs):
+        concatenated.append([Path(i).name for i in items])
+        dest = Path(dest)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(b"mp3-joined")
+        return dest
+
+    monkeypatch.setattr(stages.tts, "synthesize_audio", fake_tts)
+    monkeypatch.setattr(stages.ffmpeg_ops, "concat_audio", fake_concat)
+    monkeypatch.setattr(stages.ffmpeg_ops, "audio_duration", lambda path: 1.0)
+
+    summary = stages.generate_voiceovers()
+
+    assert summary["succeeded"] == 2
+    # 镜 1 逐句合成：皇帝用自己的音色，老者按角色 id 轮转到另一种音色
+    assert [c["text"] for c in calls[:2]] == [
+        "你们这届凡人，有点意思。", "陛下，人间已经变天了。",
+    ]
+    assert calls[0]["voice"] == "zh-CN-YunjianNeural"
+    assert calls[1]["voice"] != calls[0]["voice"]
+    # 镜 2 无台词 → 旁白一行（不传角色音色）
+    assert calls[2]["text"] == "三千年前，他也说过这句话。"
+    assert not calls[2].get("voice")
+
+    # 镜 1 的两句被拼成整镜音轨；镜 2 单句无需拼接
+    assert concatenated == [["shot_1_line_1.mp3", "shot_1_line_2.mp3"]]
+    assert (ws / "audio" / "shot_1.mp3").is_file()
+    assert (ws / "audio" / "shot_1_line_1.mp3").is_file()
+
+    manifest = json.loads((ws / "audio" / "manifest.json").read_text(encoding="utf-8"))
+    first = manifest["shots"][0]
+    assert first["audio"] == "audio/shot_1.mp3"
+    assert first["dialogue"] is True
+    # 行时间轴：每句 1s，句间 0.5s 停顿
+    assert [(line["start"], line["end"]) for line in first["lines"]] == [
+        (0.0, 1.0), (1.5, 2.5),
+    ]
+    assert [line["name"] for line in first["lines"]] == ["玉皇大帝", "老者"]
+    # 无台词的镜保持旧结构（无 lines 字段）
+    assert "lines" not in manifest["shots"][1]
+
+
+def test_generate_voiceovers_dialogue_character_timbre(tmp_path, monkeypatch):
+    """角色卡写了 timbre 时逐句传给 TTS（IndexTTS 各角色不同音库）。"""
+    storyboard = json.loads(json.dumps(DIALOGUE_STORYBOARD, ensure_ascii=False))
+    storyboard["characters"][0]["timbre"] = "播音中年男.mp3"
+    storyboard["shots"] = storyboard["shots"][:1]
+    _setup_workspace(tmp_path, monkeypatch, storyboard=storyboard)
+
+    timbres: list[str] = []
+
+    def fake_tts(text, dest, **kwargs):
+        timbres.append(kwargs.get("timbre", ""))
+        dest = Path(dest)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(b"mp3-fake")
+        return dest
+
+    monkeypatch.setattr(stages.tts, "synthesize_audio", fake_tts)
+    monkeypatch.setattr(
+        stages.ffmpeg_ops, "concat_audio",
+        lambda items, dest, **kw: (Path(dest).write_bytes(b"x"), Path(dest))[1],
+    )
+    monkeypatch.setattr(stages.ffmpeg_ops, "audio_duration", lambda path: 1.0)
+
+    stages.generate_voiceovers()
+
+    assert timbres[0] == "播音中年男.mp3"
+    assert timbres[1] == ""  # 角色卡没写 timbre，env 也没配 → 全片默认音色
+
+
+
 # ------------------------------------------------------------ 口型同步
 
 

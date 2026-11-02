@@ -36,6 +36,20 @@ logger = logging.getLogger("prompt2vid.tts")
 
 DEFAULT_VOICE = "zh-CN-XiaoxiaoNeural"
 DEFAULT_RATE = "+0%"
+
+# 角色声线表：分镜表里的角色没写 voice 时，按角色 id 轮转取一个，
+# 保证同片不同角色不是同一个嗓子（这是「人物说话」与「旁白铺底」的
+# 核心区别）。PROMPT2VID_TTS_VOICES 可用逗号列表覆盖。
+DEFAULT_CHARACTER_VOICES = (
+    "zh-CN-YunxiNeural",        # 男声（年轻、偏轻快）
+    "zh-CN-XiaoyiNeural",       # 女声（年轻、偏甜）
+    "zh-CN-YunjianNeural",      # 男声（中年、解说腔）
+    "zh-CN-XiaochenNeural",     # 女声（温柔）
+    "zh-CN-YunyangNeural",      # 男声（新闻播报）
+    "zh-CN-XiaohanNeural",      # 女声（沉稳）
+    "zh-CN-YunxiaNeural",       # 男童
+    "zh-CN-XiaomengNeural",     # 女童
+)
 # 静音占位：8kHz 单声道 1 秒的极小 MP3 帧
 _SILENT_MP3 = (
     b"\xff\xfb\x90\x00" + b"\x00" * 413
@@ -67,6 +81,43 @@ def _ref_audio_path() -> str:
     """自定义参考音频路径（PROMPT2VID_TTS_REF_AUDIO，存在才有效）。"""
     raw = os.getenv("PROMPT2VID_TTS_REF_AUDIO", "").strip()
     return raw if raw and Path(raw).is_file() else ""
+
+
+def _env_list(name: str) -> list[str]:
+    """逗号/顿号分隔的环境变量列表（空项丢弃）。"""
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return []
+    for sep in ("、", ";", "；"):
+        raw = raw.replace(sep, ",")
+    return [item.strip() for item in raw.split(",") if item.strip()]
+
+
+def voice_for_speaker(speaker_id: int) -> str:
+    """返回某发言人应使用的 edge-tts 音色。
+
+    旁白（id=0）返回空字符串：由 EDGE_TTS_VOICE / DEFAULT_VOICE 决定，
+    与旧行为一致；角色按 id 在表中轮转，不同角色自然分到不同声线。
+    """
+    if speaker_id <= 0:
+        return ""
+    palette = _env_list("PROMPT2VID_TTS_VOICES") or list(DEFAULT_CHARACTER_VOICES)
+    return palette[(speaker_id - 1) % len(palette)]
+
+
+def timbre_for_speaker(speaker_id: int) -> str:
+    """返回某发言人应使用的 IndexTTS 音色文件名（空 = 用全局音色）。
+
+    IndexTTS 的音色是插件目录里的文件，无法凭空推测文件名，因此只有
+    显式配置 PROMPT2VID_TTS_TIMBRES（逗号列表，按角色 id 顺序）或分镜
+    角色卡写了 timbre 时才会按角色区分。
+    """
+    if speaker_id <= 0:
+        return ""
+    palette = _env_list("PROMPT2VID_TTS_TIMBRES")
+    if not palette:
+        return ""
+    return palette[(speaker_id - 1) % len(palette)]
 
 
 def _comfyui_tts_available() -> bool:
@@ -112,8 +163,12 @@ def _finalize_audio(wav: Path, dest: Path, bitrate: str = "192k") -> bool:
     return dest.is_file() and dest.stat().st_size > 0
 
 
-def _tts_via_comfyui(text: str, dest: Path) -> bool:
-    """ComfyUI IndexTTS-2.5 配音（本地显卡推理，中文自然度最佳）。"""
+def _tts_via_comfyui(text: str, dest: Path, timbre: str = "") -> bool:
+    """ComfyUI IndexTTS-2.5 配音（本地显卡推理，中文自然度最佳）。
+
+    timbre 为该句指定的插件音色文件名（不同角色用不同嗓子）；
+    空串时回退到 PROMPT2VID_TTS_TIMBRE 全局音色。
+    """
     if not _comfyui_tts_available():
         return False
     from .comfyui_client import (
@@ -130,7 +185,11 @@ def _tts_via_comfyui(text: str, dest: Path) -> bool:
             if ref_path:
                 reference = client.upload_file(Path(ref_path))
             workflow = client.filter_workflow_inputs(
-                build_tts_workflow(text=text, reference_audio=reference)
+                build_tts_workflow(
+                    text=text,
+                    reference_audio=reference,
+                    timbre=timbre or None,
+                )
             )
             run_workflow(workflow, wav, client=client)
     except Exception as exc:  # noqa: BLE001 - 失败降级到下一引擎
@@ -231,12 +290,18 @@ def _write_silent_placeholder(dest: Path, text: str) -> None:
     sidecar.write_text(text, encoding="utf-8")
 
 
-def synthesize_audio(text: str, dest: str | Path, voice: str = "", rate: str = "") -> Path:
+def synthesize_audio(
+    text: str,
+    dest: str | Path,
+    voice: str = "",
+    rate: str = "",
+    timbre: str = "",
+) -> Path:
     """把文本合成为音频文件（IndexTTS-2.5 → edge-tts → 网关 → piper → 静音）。
 
     引擎选择见模块 docstring；每次降级都会写 warning 日志。
-    voice/rate 仅对 edge-tts 生效（IndexTTS 的音色由
-    PROMPT2VID_TTS_TIMBRE / PROMPT2VID_TTS_REF_AUDIO 控制）。
+    voice 仅对 edge-tts 生效（该句的音色）；timbre 仅对 IndexTTS 生效
+    （插件音色文件名）。两者都为空时用环境变量的全局音色。
 
     Returns:
         保存后的音频绝对路径。
@@ -245,7 +310,7 @@ def synthesize_audio(text: str, dest: str | Path, voice: str = "", rate: str = "
     dest.parent.mkdir(parents=True, exist_ok=True)
 
     for engine in _engine_list():
-        if engine == "comfyui" and _tts_via_comfyui(text, dest):
+        if engine == "comfyui" and _tts_via_comfyui(text, dest, timbre):
             return dest.resolve()
         if engine == "edge" and _tts_via_edge(text, dest, voice, rate):
             return dest.resolve()

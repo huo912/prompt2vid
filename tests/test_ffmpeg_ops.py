@@ -352,3 +352,102 @@ def test_merge_with_transitions_builds_xfade_chain(monkeypatch, tmp_path):
         ffmpeg_ops.merge_with_transitions(clips[:1], [], 0.5, "fade", tmp_path / "m.mp4")
     with _pytest.raises(ValueError):
         ffmpeg_ops.merge_with_transitions(clips, [1.0], 0.5, "fade", tmp_path / "m.mp4")
+
+
+# ------------------------------------------------------------ 台词拼接
+
+def test_concat_audio_single_input_copies(monkeypatch, tmp_path):
+    """单句台词不需要滤镜图（句间停顿无处插入），直接转码。"""
+    seen = _capture_ffmpeg_args(monkeypatch)
+    src = tmp_path / "line_1.mp3"
+    src.write_bytes(b"x")
+    dest = tmp_path / "shot.mp3"
+
+    ffmpeg_ops.concat_audio([src], dest, gap_seconds=0.25)
+
+    args = seen[-1]
+    joined = " ".join(args)
+    assert "-filter_complex" not in joined
+    assert "libmp3lame" in joined
+    assert str(dest) in args
+
+
+def test_concat_audio_single_input_wav_normalizes(monkeypatch, tmp_path):
+    """单段输出到 wav 时统一采样率/声道，供后续 fit_audio 复用。"""
+    seen = _capture_ffmpeg_args(monkeypatch)
+    src = tmp_path / "line_1.mp3"
+    src.write_bytes(b"x")
+
+    ffmpeg_ops.concat_audio([src], tmp_path / "shot.wav", sample_rate=24000)
+
+    joined = " ".join(seen[-1])
+    assert "-ar 24000" in joined and "-ac 1" in joined
+    assert "pcm_s16le" in joined
+
+
+def test_concat_audio_inserts_gap_silence(monkeypatch, tmp_path):
+    """多句台词：aresample/aformat 统一格式后按 gap 插静音再 concat。"""
+    seen = _capture_ffmpeg_args(monkeypatch)
+    a = tmp_path / "line_1.mp3"
+    b = tmp_path / "line_2.mp3"
+    a.write_bytes(b"x")
+    b.write_bytes(b"y")
+    dest = tmp_path / "shot.mp3"
+
+    ffmpeg_ops.concat_audio([a, b], dest, gap_seconds=0.3, sample_rate=24000)
+
+    args = seen[-1]
+    joined = " ".join(args)
+    # 两句 + 一段静音（3 个输入）
+    assert joined.count("-i") == 3
+    assert "anullsrc=r=24000:cl=mono" in joined
+    assert "-t 0.300" in joined
+    assert "concat=n=3:v=0:a=1" in joined
+    assert joined.count("aresample=24000") == 2
+    assert joined.count("aformat=sample_fmts=s16:channel_layouts=mono") == 3
+    # mp3 目标用 libmp3lame，其余用 pcm_s16le
+    assert "libmp3lame" in joined
+    ffmpeg_ops.concat_audio([a, b], tmp_path / "shot.wav", gap_seconds=0.0)
+    joined = " ".join(seen[-1])
+    assert "pcm_s16le" in joined
+    assert "concat=n=2:v=0:a=1" in joined  # gap=0 → 不插静音
+    # 空列表报错，不调用 ffmpeg
+    before = len(seen)
+    with pytest.raises(ValueError):
+        ffmpeg_ops.concat_audio([], tmp_path / "none.mp3")
+    assert len(seen) == before
+
+
+def test_audio_duration_parses_ffmpeg_output(monkeypatch, tmp_path):
+    """没有 ffprobe 时用 ffmpeg 的 Duration 行回退取时长。"""
+    monkeypatch.setattr(
+        "prompt2vid.ffmpeg_ops.resolve_tool",
+        lambda name: "/usr/bin/ffmpeg" if name == "ffmpeg" else None,
+    )
+    payload = (
+        "  Duration: 00:00:02.35, start: 0.000000, bitrate: 128 kb/s\n"
+        "  Stream #0:0: Audio: mp3, 44100 Hz, mono, fltp, 128 kb/s\n"
+    )
+
+    def fake_run(cmd, **kwargs):
+        return subprocess.CompletedProcess(cmd, 0, "", payload)
+
+    monkeypatch.setattr("prompt2vid.ffmpeg_ops.subprocess.run", fake_run)
+    src = tmp_path / "a.mp3"
+    src.write_bytes(b"x")
+    assert ffmpeg_ops.audio_duration(src) == pytest.approx(2.35)
+    assert ffmpeg_ops.audio_duration(tmp_path / "missing.mp3") == 0.0
+
+
+def test_audio_duration_tolerates_broken_probe(monkeypatch, tmp_path):
+    """探测工具输出乱码时返回 0，而不是把异常抛给配音流程。"""
+    monkeypatch.setattr("prompt2vid.ffmpeg_ops.resolve_tool", lambda name: "/usr/bin/ffprobe")
+
+    def fake_run(cmd, **kwargs):
+        return subprocess.CompletedProcess(cmd, 0, "not json", "")
+
+    monkeypatch.setattr("prompt2vid.ffmpeg_ops.subprocess.run", fake_run)
+    src = tmp_path / "a.mp3"
+    src.write_bytes(b"x")
+    assert ffmpeg_ops.audio_duration(src) == 0.0
+

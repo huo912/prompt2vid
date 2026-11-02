@@ -164,3 +164,55 @@ def test_all_engines_fail_writes_silent_placeholder(monkeypatch, tmp_path, caplo
     # 旁白文本存 sidecar，质检阶段会报"旁白无声"
     assert (tmp_path / "shot_1.txt").read_text(encoding="utf-8") == "四个字的测试"
     assert any("全部配音引擎失败" in r.getMessage() for r in caplog.records)
+
+
+# ------------------------------------------------------------ 角色声线
+
+def test_voice_for_speaker_rotates_palette(monkeypatch):
+    """旁白不指定音色；不同角色 id 拿到不同嗓子（避免全片一个声音）。"""
+    monkeypatch.delenv("PROMPT2VID_TTS_VOICES", raising=False)
+    assert tts.voice_for_speaker(0) == ""  # 旁白 → 用 EDGE_TTS_VOICE
+    voices = [tts.voice_for_speaker(i) for i in range(1, 5)]
+    assert all(voices)
+    assert len(set(voices)) == len(voices)
+    # 超出内置表长度后循环复用
+    assert tts.voice_for_speaker(len(tts.DEFAULT_CHARACTER_VOICES) + 1) == voices[0]
+
+
+def test_voice_for_speaker_env_override(monkeypatch):
+    monkeypatch.setenv("PROMPT2VID_TTS_VOICES", "zh-CN-A,zh-CN-B")
+    assert tts.voice_for_speaker(1) == "zh-CN-A"
+    assert tts.voice_for_speaker(2) == "zh-CN-B"
+    assert tts.voice_for_speaker(3) == "zh-CN-A"
+    # 也支持中文顿号/分号分隔
+    monkeypatch.setenv("PROMPT2VID_TTS_VOICES", "zh-CN-A、zh-CN-B；zh-CN-C")
+    assert [tts.voice_for_speaker(i) for i in (1, 2, 3)] == [
+        "zh-CN-A", "zh-CN-B", "zh-CN-C",
+    ]
+
+
+def test_timbre_for_speaker_defaults_empty(monkeypatch):
+    """未配置音色库时不指定 timbre（走 PROMPT2VID_TTS_TIMBRE 全局值）。"""
+    monkeypatch.delenv("PROMPT2VID_TTS_TIMBRES", raising=False)
+    assert tts.timbre_for_speaker(0) == ""
+    assert tts.timbre_for_speaker(1) == ""
+    monkeypatch.setenv("PROMPT2VID_TTS_TIMBRES", "甜美女声.mp3,播音中年男.mp3")
+    assert tts.timbre_for_speaker(1) == "甜美女声.mp3"
+    assert tts.timbre_for_speaker(2) == "播音中年男.mp3"
+    assert tts.timbre_for_speaker(0) == ""
+
+
+def test_synthesize_audio_passes_timbre_to_comfyui(monkeypatch, tmp_path):
+    """台词行的角色 timbre 会写进 IndexTTS 的 TimbreAudioLoader。"""
+    fake = FakeComfyTTSClient()
+    monkeypatch.setattr(
+        "prompt2vid.comfyui_client.ComfyUIClient", lambda *a, **kw: fake
+    )
+    _fake_transcode(monkeypatch)
+    monkeypatch.delenv("PROMPT2VID_TTS_REF_AUDIO", raising=False)
+
+    tts.synthesize_audio("陛下", tmp_path / "shot_1_line_1.mp3", timbre="帝王音.mp3")
+
+    workflow = fake.submitted[0]
+    assert workflow["timbre"]["class_type"] == "TimbreAudioLoader"
+    assert workflow["timbre"]["inputs"]["audio_file"] == "帝王音.mp3"

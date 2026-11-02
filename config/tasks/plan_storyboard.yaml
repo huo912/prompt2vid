@@ -10,14 +10,19 @@ plan_storyboard:
         {
           "id": 1,
           "name": "角色中文名",
-          "description": "英文角色外观描述：发型发色、脸型肤色、年龄体型、服装款式颜色、标志性配饰，一段固定英文，所有分镜共用"
+          "description": "英文角色外观描述：发型发色、脸型肤色、年龄体型、服装款式颜色、标志性配饰，一段固定英文，所有分镜共用",
+          "voice": "该角色的音色，可选：zh-CN-YunxiNeural / zh-CN-XiaoyiNeural / zh-CN-YunjianNeural / zh-CN-XiaochenNeural 之一（不同角色必须选不同的，留空则由代码分配）"
         }
       ],
       "shots": [
         {
           "id": 1,
           "characters": [1],
-          "narration": "本镜旁白（中文）",
+          "dialogue": [
+            {"speaker": 1, "text": "本镜该角色说出的台词（中文，口语化，短句）"},
+            {"speaker": "旁白", "text": "（可选）本镜旁白"}
+          ],
+          "narration": "本镜旁白（中文；有 dialogue 时可留空）",
           "visual": "画面描述（中文）",
           "image_prompt": "英文 SDXL 文生图 prompt，含风格/构图/光线，与相邻分镜风格一致",
           "motion_prompt": "英文 LTX 运动描述，如 'slow zoom in, gentle wind, falling leaves'",
@@ -37,6 +42,18 @@ plan_storyboard:
        每个出场人物一张角色卡，description 必须**用英文**写（禁止中文，禁止
        把画面 prompt 抄成角色描述），且具体到可复现（发色、服装颜色
        款式、体型年龄等），禁止抽象描述（如 "a beautiful girl"）；
+       不同角色必须指定不同的 voice（同一部片子里两个人不能是同一个嗓子）；
+    1b. 口播是硬性要求：人物出镜且剧本里有台词的镜头，**必须**用 dialogue 写出
+       台词，否则成片只有旁白、人物嘴不动。规则：
+       - dialogue 是有序数组，每项 {"speaker": 角色id 或 "旁白", "text": "中文台词"}；
+       - speaker 只写 characters 里已定义的 id，或写 "旁白"；不要编造角色名；
+       - 一镜 1-3 句，单句 6-18 字（单镜 3-5 秒，语速约 5 字/秒）；
+       - 对白优先、旁白次之：有人物说话就写 dialogue，不要把人话改写成旁白；
+       - 纯空镜/转场镜可以只写 narration（无 dialogue），此时按旁白配音；
+    1c. 该镜里说话的角色必须在该镜 characters 里（否则人物不在画面却听到声音）；
+    1d. 镜内说话角色的 motion_prompt 必须包含口部动作描述，如
+       "the character is speaking, lips moving naturally, subtle head motion"
+       （不说这句，LTX 会生成一张不动的脸，后续口型同步没有可对齐的目标）；
     2. 每镜的 characters 字段列出该镜出场的角色 id（空镜写 [] 或不写）；
     3. image_prompt 必须逐字包含该镜全部出场角色的 description 原文
        （一字不改、按 id 顺序拼接），再叠加画面构图/光线/风格描述——
@@ -46,7 +63,8 @@ plan_storyboard:
     5. motion_prompt 必须为英文、只描述镜头内运动（推拉摇移、元素运动）；
     6. duration_seconds 每镜 3-5 秒（LTX 生成预算），总和等于需求时长，
        镜头数控制在 4-8 个；
-    7. narration 与剧本逐镜文案一致；
+    7. narration 与剧本逐镜文案一致（剧本是旁白体时，逐镜 narration 照抄；
+       剧本是对话体时，把台词放进 dialogue、不要压成旁白）；
     8. id 从 1 开始连续编号；
     9. 必须真实调用 write_json 工具把分镜表写入 storyboard.json
        （下游所有生成环节都从这个文件读取）；
@@ -59,8 +77,8 @@ plan_storyboard:
         人物主体尽量保持姿态稳定。
   expected_output: >-
     一个 JSON 分镜表（已通过文件工具写入 storyboard.json）：characters 数组
-    每项含 id、name、description（固定英文外观描述）；shots 数组每项含 id、
-    characters（出场角色 id）、narration、visual、image_prompt（逐字包含
-    出场角色 description）、motion_prompt、duration_seconds，以及
-    total_duration_seconds。
+    每项含 id、name、description（固定英文外观描述）、voice；shots 数组每项含
+    id、characters（出场角色 id）、dialogue（台词行数组，有对白时必填）、
+    narration、visual、image_prompt（逐字包含出场角色 description）、
+    motion_prompt、duration_seconds，以及 total_duration_seconds。
   agent: storyboard_planner

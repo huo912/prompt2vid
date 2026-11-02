@@ -98,7 +98,7 @@
 
 ## 配音（TTS）可用性与音质
 
-旁白由 `tts.py` 的引擎链产出（`PROMPT2VID_TTS_ENGINE=auto` 按序尝试，
+旁白与角色台词由 `tts.py` 的引擎链产出（`PROMPT2VID_TTS_ENGINE=auto` 按序尝试，
 **每级降级都会写 run.log warning**——音色变差一定能发现，不再静默换）：
 
 1. **IndexTTS-2.5**（ComfyUI 本地推理，中文自然度最佳；自带 59 个音色，
@@ -119,6 +119,53 @@
 | `PROMPT2VID_TTS_SPEED` | 1.0 | 语速（>1 变慢，<1 变快） |
 | `PROMPT2VID_TTS_SILENCE_MS` | 200 | 句间停顿毫秒：长句旁白的自然换气感，嫌拖沓可降到 100 |
 | `PROMPT2VID_TTS_KEEP_CACHED` | true | 模型留显存逐镜免重载；低显存与其它阶段抢卡时设 false |
+
+### 角色对白（让人物真的开口）
+
+「人物不说话、只有旁白」通常是**内容层没建模对白**：分镜里只有
+`narration`，LTX 片段是无声的，LatentSync 再准也没有台词可驱动。
+现在分镜表可以逐镜写台词，链路会一路带到底：
+
+```json
+{
+  "characters": [
+    {"id": 1, "name": "玉皇大帝", "description": "...", "voice": "zh-CN-YunjianNeural"}
+  ],
+  "shots": [
+    {
+      "id": 1,
+      "characters": [1],
+      "dialogue": [
+        {"speaker": 1, "text": "你们这届凡人，有点意思。"},
+        {"speaker": "旁白", "text": "三千年前，他也说过这句话。"}
+      ],
+      "motion_prompt": "medium close-up, the character is speaking, lips moving naturally"
+    }
+  ]
+}
+```
+
+链路行为：
+
+1. **配音**：每句台词单独合成，说话角色用自己的 `voice`（edge-tts）或
+   `timbre`（IndexTTS 音库）；角色卡没写音色时按角色 id 在默认声线表里
+   轮转，保证不同角色不同嗓子；随后按顺序拼成 `audio/shot_<id>.mp3`，
+   句间留 0.25 秒停顿；
+2. **口型同步**：该镜音轨就是 lipsync 的驱动音频，所以对白直接驱动唇形；
+3. **字幕**：按 manifest 里的行起止时间生成多行字幕，不是整镜一条；
+4. **兼容**：没有 `dialogue` 的镜头照旧用 `narration` 配一条旁白
+   （旧分镜表、纯空镜/解说类片子行为完全不变）。
+
+| 变量 | 默认 | 说明 |
+|------|------|------|
+| `PROMPT2VID_TTS_VOICES` | 内置 8 个男女声 | edge-tts 角色声线表（逗号分隔，按角色 id 轮转）；角色卡 `voice` 优先 |
+| `PROMPT2VID_TTS_TIMBRES` | 空 | IndexTTS 角色音色表（TimbreModel 文件名，按角色 id 轮转）；空则全片用 `PROMPT2VID_TTS_TIMBRE` |
+| `PROMPT2VID_DIALOGUE_GAP` | 0.25 | 一镜多句台词之间的停顿秒数 |
+| `PROMPT2VID_SUBTITLE_SPEAKER` | 空 | 设 `on` 时字幕显示「角色名：台词」，默认只显示台词 |
+
+> 写对白时同步改 `motion_prompt`（加 `the character is speaking, lips
+> moving naturally`）：LTX 若生成一张抿嘴不动的脸，LatentSync 没有可对齐
+> 的目标，唇形会显得僵。
 
 ### 公司网络拦 WSS（edge-tts 403）时
 
@@ -145,8 +192,8 @@ curl -L -o models/tts/zh_CN-huayan-medium.onnx.json \
 
 ## 口型同步（LatentSync）
 
-配音阶段之后的增强媒体阶段：用每镜配音驱动片段人物唇形，嘴动与旁白
-对上；配音比片段长时自动往返补帧（旁白零截断），渲染优先使用
+配音阶段之后的增强媒体阶段：用每镜音轨（角色台词 + 旁白）驱动片段人物唇形，
+嘴动与台词对上；配音比片段长时自动往返补帧（台词零截断），渲染优先使用
 `lipsync/shot_<id>.mp4`。约需 20GB 显存（4090/5090 档可用），安装见
 [LOCAL_SETUP.md §8](LOCAL_SETUP.md)。
 

@@ -450,6 +450,83 @@ def concat_media(
     return dest
 
 
+def concat_audio(
+    items: list[Path],
+    dest: str | Path,
+    *,
+    gap_seconds: float = 0.0,
+    sample_rate: int = 44100,
+) -> Path:
+    """按顺序拼接音频，每段之间可插入固定静音（多角色对白用）。
+
+    与 `concat_media(reencode_audio=True)` 的区别：走 concat 滤镜并强制
+    统一采样率/声道，**允许各段编码参数不同**——不同角色由不同 TTS
+    引擎/音色产出时（edge 24kHz、IndexTTS 44.1kHz、piper 22.05kHz），
+    concat demuxer 会直接报参数不匹配，这里不会。
+
+    dest 后缀为 .mp3 时输出 libmp3lame 192k，否则输出 PCM16 wav。
+    """
+    items = [Path(path) for path in items]
+    if not items:
+        raise ValueError("concat_audio 至少需要一个音频文件")
+    dest = Path(dest)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+
+    gap = max(0.0, float(gap_seconds))
+    if len(items) == 1:
+        # 只有一句台词：句间停顿无处插入，直接转码，省一次滤镜开销
+        args = ["-i", str(items[0])]
+        if dest.suffix.lower() == ".mp3":
+            args += ["-c:a", "libmp3lame", "-b:a", "192k"]
+        else:
+            args += ["-ar", str(sample_rate), "-ac", "1", "-c:a", "pcm_s16le"]
+        args.append(str(dest))
+        run_ffmpeg(args)
+        return dest
+
+    args: list[str] = []
+    for item in items:
+        args += ["-i", str(item)]
+    gap_inputs = len(items) - 1 if gap > 0.01 else 0
+    for _ in range(gap_inputs):
+        args += ["-f", "lavfi", "-t", f"{gap:.3f}",
+                 "-i", f"anullsrc=r={sample_rate}:cl=mono"]
+
+    parts: list[str] = []
+    labels: list[str] = []
+    for idx in range(len(items)):
+        parts.append(
+            f"[{idx}:a]aresample={sample_rate},"
+            "aformat=sample_fmts=s16:channel_layouts=mono"
+            f"[l{idx}]"
+        )
+        labels.append(f"[l{idx}]")
+        if gap_inputs and idx < len(items) - 1:
+            gap_idx = len(items) + idx
+            parts.append(f"[{gap_idx}:a]aformat=sample_fmts=s16:channel_layouts=mono[g{idx}]")
+            labels.append(f"[g{idx}]")
+
+    parts.append(
+        f"{''.join(labels)}concat=n={len(labels)}:v=0:a=1[out]"
+    )
+    args += ["-filter_complex", ";".join(parts), "-map", "[out]"]
+    if dest.suffix.lower() == ".mp3":
+        args += ["-c:a", "libmp3lame", "-b:a", "192k"]
+    else:
+        args += ["-c:a", "pcm_s16le"]
+    args.append(str(dest))
+    run_ffmpeg(args)
+    return dest
+
+
+def audio_duration(path: str | Path) -> float:
+    """探测音频时长（秒）；探测失败返回 0（调用方按缺时长处理）。"""
+    try:
+        return float(probe_file(path)["duration_seconds"])
+    except (RuntimeError, FileNotFoundError, KeyError, TypeError, ValueError):
+        return 0.0
+
+
 # xfade 可用的过渡名（ComfyUI 无关，ffmpeg 内置）；fade 是最通用的叠化。
 SUPPORTED_TRANSITIONS = (
     "fade", "fadeblack", "fadewhite", "dissolve", "wipeleft", "wiperight",

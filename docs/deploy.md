@@ -604,7 +604,9 @@ cd /root/autodl-tmp/ComfyUI
 nohup python main.py --listen 127.0.0.1 --port 8188 > comfyui.log 2>&1 &
 tail -f comfyui.log 
 
-ssh -N -L 8188:127.0.0.1:8188 -p 40376 root@connect.westb.seetacloud.com
+ssh -N -L 8188:127.0.0.1:8188 -p 48178 root@connect.westc.seetacloud.com
+
+
 
 
 source .venv/bin/activate

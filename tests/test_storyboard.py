@@ -283,3 +283,132 @@ def test_backward_compatible_storyboard_without_characters(tmp_path: Path):
     shots = storyboard.load_storyboard(path)
     assert shots[0].characters == []
     assert shots[0].image_prompt == "autumn park"
+
+
+# ------------------------------------------------------------ 角色对白
+
+
+def test_character_voice_and_timbre_parsed(tmp_path: Path):
+    """角色卡可带 voice（edge-tts 音色）与 timbre（IndexTTS 音库）。"""
+    characters = [
+        {
+            "id": 1,
+            "name": "玉皇大帝",
+            "description": "an old emperor in golden robes",
+            "voice": "zh-CN-YunjianNeural",
+            "timbre": "播音中年男.mp3",
+        }
+    ]
+    path = _write_with_characters(
+        tmp_path,
+        shots=[{"id": 1, "image_prompt": "palace", "duration_seconds": 4}],
+        characters=characters,
+    )
+    characters = storyboard.load_characters(path)
+    assert characters[1].voice == "zh-CN-YunjianNeural"
+    assert characters[1].timbre == "播音中年男.mp3"
+
+
+def test_dialogue_speaker_resolution(tmp_path: Path):
+    """speaker 支持角色 id / 角色名 / 旁白。/ 未定义发言人降级为旁白。"""
+    characters = [
+        {"id": 1, "name": "玉皇大帝", "description": "an old emperor"},
+        {"id": 2, "name": "老者", "description": "an old servant"},
+    ]
+    shot = {
+        "id": 1,
+        "characters": [1, 2],
+        "image_prompt": "palace hall",
+        "duration_seconds": 4,
+        "dialogue": [
+            {"speaker": 1, "text": "你们这届凡人，有点意思。"},
+            {"speaker": "老者", "text": "陛下，人间已经变天了。"},
+            {"speaker": "旁白", "text": "三千年前，他也说过这句话。"},
+            {"speaker": "路人甲", "text": "谁在说话？"},
+        ],
+    }
+    path = _write_with_characters(tmp_path, shots=[shot], characters=characters)
+    shots = storyboard.load_storyboard(path)
+    lines = shots[0].dialogue
+
+    assert [line.speaker for line in lines] == [1, 2, storyboard.NARRATOR_ID,
+                                                storyboard.NARRATOR_ID]
+    assert lines[0].name == "玉皇大帝"
+    assert lines[1].name == "老者"
+    assert lines[2].is_narration and lines[2].name == ""
+    # 未定义发言人 → 旁白 + 修复项（不中断出片）
+    assert lines[3].is_narration
+    assert any("路人甲" in f for f in shots[0].fixes)
+
+
+def test_dialogue_accepts_prefixed_strings_and_dict_singleton(tmp_path: Path):
+    """dialogue 也宽容接受 "角色名：台词" 字符串与单个对象。"""
+    characters = [{"id": 1, "name": "女主", "description": "a young woman"}]
+    shot = {
+        "id": 1,
+        "characters": [1],
+        "image_prompt": "park",
+        "duration_seconds": 4,
+        "dialogue": ["女主：你来晚了。", "旁白：那年冬天，雪很大。"],
+    }
+    path = _write_with_characters(tmp_path, shots=[shot], characters=characters)
+    shots = storyboard.load_storyboard(path)
+    assert [line.speaker for line in shots[0].dialogue] == [1, storyboard.NARRATOR_ID]
+    assert shots[0].dialogue[0].text == "你来晚了。"
+
+    single = dict(shot, dialogue={"speaker": 1, "text": "走吧。"})
+    path = _write_with_characters(tmp_path, shots=[single], characters=characters)
+    shots = storyboard.load_storyboard(path)
+    assert len(shots[0].dialogue) == 1
+    assert shots[0].dialogue[0].speaker == 1
+
+
+def test_dialogue_empty_lines_dropped(tmp_path: Path):
+    shot = {
+        "id": 1,
+        "image_prompt": "park",
+        "duration_seconds": 4,
+        "dialogue": [{"speaker": 1, "text": "   "}, {"speaker": 1, "text": "走吧。"}],
+    }
+    path = _write(tmp_path / "storyboard.json", json.dumps({"shots": [shot]},
+                                                          ensure_ascii=False))
+    shots = storyboard.load_storyboard(path)
+    assert len(shots[0].dialogue) == 1
+
+
+def test_spoken_lines_falls_back_to_narration(tmp_path: Path):
+    """没有 dialogue 的旧分镜：spoken_lines() 回退成一整条旁白。"""
+    data = {
+        "shots": [
+            {
+                "id": 1,
+                "narration": "秋天的公园",
+                "image_prompt": "autumn park",
+                "duration_seconds": 4,
+            }
+        ]
+    }
+    path = _write(tmp_path / "storyboard.json", json.dumps(data, ensure_ascii=False))
+    shot = storyboard.load_storyboard(path)[0]
+    assert shot.has_dialogue is False
+    lines = shot.spoken_lines()
+    assert len(lines) == 1
+    assert lines[0].is_narration
+    assert lines[0].text == "秋天的公园"
+
+
+def test_spoken_lines_prefers_dialogue(tmp_path: Path):
+    """有 dialogue 时不再额外念 narration，避免同一镜说两遍。"""
+    shot = {
+        "id": 1,
+        "narration": "旁白兜底文案",
+        "image_prompt": "park",
+        "duration_seconds": 4,
+        "dialogue": [{"speaker": "旁白", "text": "他抬头看天。"}],
+    }
+    path = _write(tmp_path / "storyboard.json", json.dumps({"shots": [shot]},
+                                                          ensure_ascii=False))
+    shot = storyboard.load_storyboard(path)[0]
+    assert shot.has_dialogue is True
+    assert [line.text for line in shot.spoken_lines()] == ["他抬头看天。"]
+
