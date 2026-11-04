@@ -346,8 +346,10 @@ export PROMPT2VID_PROFILE=4090                    # 或只给档位简名
 | `PROMPT2VID_FFMPEG` / `PROMPT2VID_FFPROBE` | 指定 ffmpeg/ffprobe 可执行文件路径（不设则按 PATH → 常见目录 → 随包二进制查找；ffprobe 缺失时探测自动回退解析 ffmpeg 输出） |
 | `DOUYIN_DRY_RUN` | true 时抖音发布仅记录状态 |
 | `PROMPT2VID_TTS_ENGINE` | 配音引擎（`auto` 默认 / `comfyui` / `edge` / `gateway` / `piper`；auto 按序尝试，每级降级都有日志告警） |
-| `PROMPT2VID_TTS_TIMBRE` / `PROMPT2VID_TTS_REF_AUDIO` | IndexTTS 音色：插件自带音色文件名（默认 `甜美女声.mp3`，共 59 个）或自定义克隆参考音频（3-15 秒干净人声） |
+| `PROMPT2VID_TTS_TIMBRE` / `PROMPT2VID_TTS_REF_AUDIO` | IndexTTS 音色：插件自带音色文件名（默认 `甜美女声.mp3`，共 59 个）或自定义克隆参考音频（3-15 秒干净人声）；角色卡/`PROMPT2VID_TTS_TIMBRES` 按角色分配不同嗓子 |
+| `PROMPT2VID_TTS_EMOTION` / `PROMPT2VID_TTS_EMOTION_WEIGHT` | IndexTTS 情感控制：全局基调描述（默认自然口语化，治「读课文」）与权重（0-1）；台词逐句可在分镜表 dialogue 写 `emotion` 短语覆盖 |
 | `PROMPT2VID_TTS_SPEED` / `PROMPT2VID_TTS_SILENCE_MS` / `PROMPT2VID_TTS_KEEP_CACHED` | IndexTTS 语速（>1 变慢）/ 句间停顿毫秒（默认 200）/ 模型是否留显存（默认开） |
+| `PROMPT2VID_PAD_MODE` | 片段垫片模式（配音比片段长/过渡垫片时）：默认 `pingpong` 末段倒放续接（运动连续、不卡顿）；`freeze` 回退定格末帧 |
 | `PROMPT2VID_LIPSYNC` / `PROMPT2VID_LIPSYNC_EXPRESSION` / `PROMPT2VID_LIPSYNC_STEPS` | 口型同步开关（`auto` 默认，节点齐全才跑 / `on` / `off`）/ 唇形表现力（默认 1.5）/ 推理步数（默认 20）；需 ComfyUI 装 LatentSyncWrapper + VideoHelperSuite（约 20GB 显存） |
 | `PROMPT2VID_TTS_PIPER_MODEL` / `EDGE_TTS_PROXY` | 回退链：piper 离线配音音色（默认探测 `models/tts/`）与 edge-tts 代理（公司网络拦 403 时用，见 [docs/QUALITY.md](docs/QUALITY.md) §配音） |
 

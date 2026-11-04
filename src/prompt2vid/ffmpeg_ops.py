@@ -399,8 +399,10 @@ def normalize_clip(clip: str | Path, dest: str | Path, extend_seconds: float = 0
     - 帧率与 LTX 输出一致（COMFYUI_LTX_FPS，默认 25），不再硬编码；
     - 中转质量默认 CRF 16（PROMPT2VID_CLIP_CRF 可调）：中转片段之后还要
       再经成片转码，这里保持高质量避免两代有损叠加；
-    - extend_seconds > 0 时用定格末帧（tpad）延长片段——用于配音比片段
-      长的场景，避免旁白被截断；
+    - extend_seconds > 0 时延长片段（配音比片段长、xfade 过渡垫片）：
+      默认往返（PROMPT2VID_PAD_MODE=pingpong）——末段倒放续接，运动
+      连续地穿过过渡/配音尾段，比定格末帧自然（定格会在每镜结尾出现
+      「卡一下再切」的生硬感）；设 freeze 回退定格（tpad clone）；
     - PROMPT2VID_SMOOTH_FPS > 源帧率时启用 minterpolate 补帧（纯 CPU，
       不占显存；运镜/平移镜头的流畅度提升明显，快速运动可能产生形变，
       默认关闭）。建议 50（25fps 翻倍）。
@@ -419,8 +421,24 @@ def normalize_clip(clip: str | Path, dest: str | Path, extend_seconds: float = 0
             "mc_mode=aobmc:me_mode=bidir:vsbmc=1"
         )
     if extend_seconds > 0.01:
-        filters.append(f"tpad=stop_mode=clone:stop_duration={extend_seconds:.3f}")
+        pad_mode = os.getenv("PROMPT2VID_PAD_MODE", "pingpong").strip().lower() or "pingpong"
+        if pad_mode == "pingpong":
+            # 末段倒放续接：运动连续穿过过渡，替代定格末帧。
+            # 结尾补 fps 归一化——reverse/setpts 会让时间戳有 ~0.5% 漂移，
+            # 多镜累积下来 xfade 会与音轨错位
+            out_fps = smooth_fps if smooth_fps > fps * 1.05 else fps
+            filters.append(
+                f"split[pp_main][pp_rev];"
+                f"[pp_rev]reverse,trim=duration={extend_seconds:.3f},"
+                f"setpts=PTS-STARTPTS[pp_tail];"
+                f"[pp_main][pp_tail]concat=n=2:v=1:a=0,"
+                f"fps={out_fps:g}"
+            )
+        else:
+            filters.append(f"tpad=stop_mode=clone:stop_duration={extend_seconds:.3f}")
     if filters:
+        # 逗号衔接：minterpolate 的输出线性接进 split；pingpong 图内部的
+        # 分支已用分号+标签自成一体（整图单输入单输出，-vf 可用）
         args += ["-vf", ",".join(filters)]
     if smooth_fps <= fps * 1.05:
         # 补帧时输出帧率由 minterpolate 决定，再叠 -r 会做二次重采样

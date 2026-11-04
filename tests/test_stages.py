@@ -597,7 +597,9 @@ def test_generate_voiceovers_dialogue_character_timbre(tmp_path, monkeypatch):
     stages.generate_voiceovers()
 
     assert timbres[0] == "播音中年男.mp3"
-    assert timbres[1] == ""  # 角色卡没写 timbre，env 也没配 → 全片默认音色
+    # 角色卡没写 timbre、env 也没配 → 按角色 id 轮转默认音色表（角色 2）
+    assert timbres[1] == stages.tts.timbre_for_speaker(2)
+    assert timbres[1] != ""
 
 
 

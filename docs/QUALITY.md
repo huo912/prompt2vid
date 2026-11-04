@@ -55,12 +55,17 @@
 
 ### 4090（24GB）——性价比最高的档
 
-13B distilled fp8 + 576x1024 是本档甜点位：
+13B + 576x1024 是本档基线，画质优先换 dev 底模（参考级画质，肢体/
+手部稳定性明显更好）：
 
+- 底模用 `ltxv-13b-0.9.7-dev-fp8.safetensors`：cfg 3.0 / 30 步自动
+  适配，单镜耗时约为蒸馏版 3-4 倍（整批 30-40 分钟）。数据盘放不下
+  时把模型放 AutoDL 网盘（`/autodl-fs/data`）再软链到
+  `models/checkpoints`——每批加载多 1-2 分钟，推理速度不受影响；
 - `COMFYUI_LTX_MAX_PIXELS=921600`（720p）在 24GB 上偏激进：13B 权重
   15.7GB + 720p×121 帧的激活值容易顶满，**个别镜头 OOM 再考虑**，
   预检会提示这个风险；
-- 想要 720 宽输出又不冒 OOM 风险：保持 589824 + 开
+  想要 720 宽输出又不冒 OOM 风险：保持 589824 + 开
   `PROMPT2VID_UPSCALE=720`（×1.25 放大痕迹很小）；
 - T5 留 CPU：T5 只在每镜开头跑一次（几秒），搬上 GPU 省不了多少时间，
   却挤占 13B 的激活空间；
@@ -115,10 +120,16 @@
 | 变量 | 默认 | 说明 |
 |------|------|------|
 | `PROMPT2VID_TTS_TIMBRE` | 甜美女声.mp3 | 插件自带音色（TimbreModel 目录共 59 个：新闻女声/说书人/御姐配音/温润男声/播音中年男/花甲奶奶…）；完整列表看 ComfyUI 节点下拉框 |
+| `PROMPT2VID_TTS_TIMBRES` | 空 | 角色音色表（逗号分隔，按角色 id 顺序）；空则按角色 id 轮转内置表，不同角色自动不同嗓子 |
 | `PROMPT2VID_TTS_REF_AUDIO` | 空 | 指向 3-15 秒干净人声（wav/mp3）时**克隆该音色**，优先于 timbre |
 | `PROMPT2VID_TTS_SPEED` | 1.0 | 语速（>1 变慢，<1 变快） |
 | `PROMPT2VID_TTS_SILENCE_MS` | 200 | 句间停顿毫秒：长句旁白的自然换气感，嫌拖沓可降到 100 |
+| `PROMPT2VID_TTS_EMOTION` | 自然口语化… | **全局情感基调**（EmotionTextNode）：避免「读课文感」的第一杠杆。台词逐句写 `emotion` 短语时按句覆盖（如「哭着说」「得意悠闲」）；空串整体关闭 |
+| `PROMPT2VID_TTS_EMOTION_WEIGHT` | 0.6 | 情感权重：0-1，越大语气越浓 |
 | `PROMPT2VID_TTS_KEEP_CACHED` | true | 模型留显存逐镜免重载；低显存与其它阶段抢卡时设 false |
+
+> 采样说明：工作流固定 `num_beams=1`（关束搜索）+ 随机采样——束搜索
+> 输出偏「播音腔」，是读课文感的主要来源；无需手动调。
 
 ### 角色对白（让人物真的开口）
 
@@ -246,6 +257,8 @@ curl -L -o models/tts/zh_CN-huayan-medium.onnx.json \
 
 | 症状 | 原因 | 处理 |
 |------|------|------|
+| 配音像读课文 | 采样用束搜索 + 无情感控制 | 已默认关束搜索 + EmotionTextNode 全局基调；台词逐句写 `emotion` 短语按句调语气 |
+| 每镜结尾卡一下再切 | 过渡垫片是定格末帧 | 已默认 pingpong 垫片（末段倒放续接，`PROMPT2VID_PAD_MODE` 可回退 freeze） |
 | 成片无旁白（有字幕没人声） | edge-tts 被网络拦截（403）→ 静音占位 | 本地 piper 离线配音（见上文 §配音）；质检的 `voiceover_audible` 会明确报出 |
 | 成片有持续底噪/嗡声 | 旧版 loudnorm 把静音占位的量化噪声满增益放大 | 已修复（静音输入直接输出纯静音）；老运行用 `--resume --from render` 重渲染 |
 | 镜头切换生硬 | 渲染默认硬切 | `PROMPT2VID_TRANSITION`（默认已开 0.5s 叠化，见上文 §镜头过渡） |

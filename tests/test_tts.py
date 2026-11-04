@@ -101,8 +101,11 @@ def test_comfyui_engine_success(monkeypatch, tmp_path):
     # 提交的工作流是 IndexTTS-2.5 节点链
     assert len(fake.submitted) == 1
     workflow = fake.submitted[0]
-    assert workflow["tts"]["class_type"] == "IndexTTS25BaseNode"
+    # 默认带全局情感描述 → 情感节点；采样关束搜索
+    assert workflow["tts"]["class_type"] == "IndexTTS25EmotionTextNode"
     assert workflow["tts"]["inputs"]["text"] == "秋天的公园"
+    assert workflow["tts"]["inputs"]["num_beams"] == 1
+    assert workflow["tts"]["inputs"]["emotion_description"]
     assert workflow["timbre"]["class_type"] == "TimbreAudioLoader"
     assert workflow["save"]["class_type"] == "SaveAudio"
     # 中间 wav 已清理
@@ -192,10 +195,13 @@ def test_voice_for_speaker_env_override(monkeypatch):
 
 
 def test_timbre_for_speaker_defaults_empty(monkeypatch):
-    """未配置音色库时不指定 timbre（走 PROMPT2VID_TTS_TIMBRE 全局值）。"""
+    """未配置音色库时按角色 id 轮转默认音色表；旁白恒为空（走全局值）。"""
     monkeypatch.delenv("PROMPT2VID_TTS_TIMBRES", raising=False)
-    assert tts.timbre_for_speaker(0) == ""
-    assert tts.timbre_for_speaker(1) == ""
+    assert tts.timbre_for_speaker(0) == ""  # 旁白：全局音色
+    first = tts.timbre_for_speaker(1)
+    second = tts.timbre_for_speaker(2)
+    assert first and second and first != second  # 不同角色不同嗓子
+    assert tts.timbre_for_speaker(1) == first  # 同角色稳定
     monkeypatch.setenv("PROMPT2VID_TTS_TIMBRES", "甜美女声.mp3,播音中年男.mp3")
     assert tts.timbre_for_speaker(1) == "甜美女声.mp3"
     assert tts.timbre_for_speaker(2) == "播音中年男.mp3"
@@ -216,3 +222,26 @@ def test_synthesize_audio_passes_timbre_to_comfyui(monkeypatch, tmp_path):
     workflow = fake.submitted[0]
     assert workflow["timbre"]["class_type"] == "TimbreAudioLoader"
     assert workflow["timbre"]["inputs"]["audio_file"] == "帝王音.mp3"
+
+
+def test_synthesize_audio_passes_emotion_to_comfyui(monkeypatch, tmp_path):
+    """台词行的 emotion 覆盖全局情感描述（逐句语气控制）。"""
+    fake = FakeComfyTTSClient()
+    monkeypatch.setattr(
+        "prompt2vid.comfyui_client.ComfyUIClient", lambda *a, **kw: fake
+    )
+    _fake_transcode(monkeypatch)
+    monkeypatch.delenv("PROMPT2VID_TTS_REF_AUDIO", raising=False)
+
+    # 逐句情感：emotion 非空时不需要探测情感节点（测试环境 ComfyUI 不可达
+    # 也不会被触发——探测只在 _tts_via_comfyui 且 emotion 非空时发生，
+    # FakeComfyTTSClient 的 node_exists 不含情感节点会清空 emotion，
+    # 因此这里直接 mock 探测结果为 True）
+    monkeypatch.setattr(tts, "_emotion_node_available", lambda: True)
+    tts.synthesize_audio(
+        "这活，我们真不会。", tmp_path / "shot_5_line_2.mp3", emotion="哽咽，懊悔自责"
+    )
+
+    workflow = fake.submitted[0]
+    assert workflow["tts"]["class_type"] == "IndexTTS25EmotionTextNode"
+    assert workflow["tts"]["inputs"]["emotion_description"] == "哽咽，懊悔自责"

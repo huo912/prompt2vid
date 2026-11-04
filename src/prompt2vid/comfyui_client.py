@@ -105,6 +105,12 @@ DEFAULT_TTS_SPEED = 1.0
 # 句间停顿（毫秒）：IndexTTS 的 interval_silence_ms，200ms 让长句
 # 旁白有自然换气感，而不是一口气念完
 DEFAULT_TTS_SILENCE_MS = 200
+# 情感控制（IndexTTS25EmotionTextNode 的 emotion_description）：
+# 默认给一个轻松口语化的整体基调，避免默认中性音色念出「读课文感」；
+# 逐句台词可在分镜表 dialogue 里写 emotion 短语覆盖（如「哭着说」）。
+# PROMPT2VID_TTS_EMOTION="" 可整体关闭（回到 BaseNode）。
+DEFAULT_TTS_EMOTION = "自然口语化地说，像日常聊天一样放松，语调有起伏"
+DEFAULT_TTS_EMOTION_WEIGHT = 0.6
 
 # 口型同步（LatentSync 1.6，经 ShmuelRonen/ComfyUI-LatentSyncWrapper
 # 自定义节点 + VideoHelperSuite，见 docs/LOCAL_SETUP.md）。
@@ -1116,6 +1122,7 @@ def build_tts_workflow(
     speed: float | None = None,
     silence_ms: int | None = None,
     keep_cached: bool | None = None,
+    emotion: str | None = None,
 ) -> dict[str, Any]:
     """IndexTTS-2.5 配音工作流（API 格式）。
 
@@ -1135,6 +1142,10 @@ def build_tts_workflow(
             PROMPT2VID_TTS_SILENCE_MS（默认 200，长句旁白有换气感）。
         keep_cached: 推理后模型是否留在显存（整批逐镜合成时避免反复
             加载 ~8GB 模型）；缺省读 PROMPT2VID_TTS_KEEP_CACHED（默认开）。
+        emotion: 该句的情感描述（中文短语，如「好奇地、带笑意」）。
+            缺省读 PROMPT2VID_TTS_EMOTION 全局描述；空串关掉情感控制
+            （用回 BaseNode）。非空时用 IndexTTS25EmotionTextNode，
+            服务器缺该节点时 tts.py 会在提交前清掉 emotion 走 BaseNode。
     """
     timbre = timbre or env_str("PROMPT2VID_TTS_TIMBRE", DEFAULT_TTS_TIMBRE)
     lang_value = lang or env_str("PROMPT2VID_TTS_LANG", DEFAULT_TTS_LANG)
@@ -1167,7 +1178,26 @@ def build_tts_workflow(
         "lang": lang_value,
         "duration_factor": speed_value,
         "interval_silence_ms": silence,
+        # 采样参数：束搜索（节点默认 num_beams=3）输出偏「播音腔」，是
+        # 「读课文感」的主要来源；关掉束搜索改随机采样，韵律自然得多
+        "do_sample_mode": "on",
+        "num_beams": 1,
     }
+    # 情感控制（IndexTTS25EmotionTextNode，比 BaseNode 多两个输入）：
+    # emotion 为该句的情感描述（如「好奇地打量，语调带笑意」），缺省读
+    # PROMPT2VID_TTS_EMOTION 全局描述；空串则退回 BaseNode（老版插件）
+    emotion_value = (
+        emotion if emotion is not None
+        else env_str("PROMPT2VID_TTS_EMOTION", DEFAULT_TTS_EMOTION)
+    )
+    if emotion_value:
+        tts_inputs["emotion_description"] = emotion_value
+        tts_inputs["emotion_weight"] = env_float(
+            "PROMPT2VID_TTS_EMOTION_WEIGHT", DEFAULT_TTS_EMOTION_WEIGHT
+        )
+        tts_class = "IndexTTS25EmotionTextNode"
+    else:
+        tts_class = "IndexTTS25BaseNode"
     workflow: dict[str, Any] = {"timbre": reference_node}
     if keep_cached:
         workflow["cache"] = {
@@ -1176,7 +1206,7 @@ def build_tts_workflow(
         }
         tts_inputs["cache_control"] = ["cache", 0]
     workflow["tts"] = {
-        "class_type": "IndexTTS25BaseNode",
+        "class_type": tts_class,
         "inputs": tts_inputs,
     }
     workflow["save"] = {
@@ -1268,6 +1298,9 @@ def build_lipsync_workflow(
             "class_type": "VHS_VideoCombine",
             "inputs": {
                 "images": ["latentsync", 0],
+                # 音频一起进容器：每个分镜的口型片段自带配音，
+                # 逐镜预览/剪辑不用再对 audio/ 里的音轨
+                "audio": ["latentsync", 1],
                 "frame_rate": fps_value,
                 "loop_count": 0,
                 "filename_prefix": filename_prefix,

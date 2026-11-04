@@ -66,6 +66,13 @@ def _print_run_summary(run_dir: Path) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # Windows GBK 码页控制台打不出 ✓ 等字符时降级为 ? 而不是崩溃
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            try:
+                stream.reconfigure(errors="replace")
+            except (ValueError, OSError):
+                pass
     parser = argparse.ArgumentParser(
         prog="prompt2vid",
         description="一句话描述 → 自动生成视频并发布到抖音",

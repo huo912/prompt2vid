@@ -263,6 +263,7 @@ _NODE_OUTPUT_SLOTS = {
     "LoadAudio": 1,                  # AUDIO（ComfyUI 核心）
     "IndexTTS25CacheControlNode": 1, # cache_control DICT
     "IndexTTS25BaseNode": 3,         # audio / seed / subtitle
+    "IndexTTS25EmotionTextNode": 3,  # audio / seed / subtitle
     "SaveAudio": 0,
     # LatentSync 口型同步（ShmuelRonen/ComfyUI-LatentSyncWrapper + VHS）
     "VHS_LoadVideo": 4,              # IMAGE / frame_count / audio / video_info
@@ -497,19 +498,24 @@ def test_tts_workflow_structure_with_bundled_timbre(monkeypatch):
 
     wf = build_tts_workflow("秋天的公园")
 
-    # 自带音色：TimbreAudioLoader → (缓存控制) → IndexTTS25BaseNode → SaveAudio
+    # 自带音色：TimbreAudioLoader → (缓存控制) → 情感节点 → SaveAudio
     assert wf["timbre"]["class_type"] == "TimbreAudioLoader"
     assert wf["timbre"]["inputs"]["audio_file"] == "甜美女声.mp3"
     assert wf["cache"]["class_type"] == "IndexTTS25CacheControlNode"
     assert wf["cache"]["inputs"]["keep_models_cached"] is True
     tts_inputs = wf["tts"]["inputs"]
-    assert wf["tts"]["class_type"] == "IndexTTS25BaseNode"
+    # 默认带全局情感描述 → 用情感节点；采样关束搜索（num_beams=1）
+    assert wf["tts"]["class_type"] == "IndexTTS25EmotionTextNode"
     assert tts_inputs["text"] == "秋天的公园"
     assert tts_inputs["reference_audio"] == ["timbre", 0]
     assert tts_inputs["cache_control"] == ["cache", 0]
     assert tts_inputs["lang"] == "ZH"
     assert tts_inputs["duration_factor"] == 1.0
     assert tts_inputs["interval_silence_ms"] == 200
+    assert tts_inputs["do_sample_mode"] == "on"
+    assert tts_inputs["num_beams"] == 1
+    assert tts_inputs["emotion_description"]
+    assert 0.0 <= tts_inputs["emotion_weight"] <= 1.0
     assert wf["save"]["inputs"]["audio"] == ["tts", 0]
     # JSON 可序列化（/prompt 的 body）
     json.dumps(wf, ensure_ascii=False)

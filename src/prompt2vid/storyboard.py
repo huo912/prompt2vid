@@ -70,11 +70,14 @@ class Line:
     """一句台词（或一句旁白）。
 
     speaker 是角色 id，0 表示旁白；name 是角色的中文名（写字幕前缀用）。
+    emotion 是该句的情感描述（中文短语，如「好奇地打量，语调带笑意」），
+    给 IndexTTS-2.5 情感节点用；空串时读全局 PROMPT2VID_TTS_EMOTION。
     """
 
     speaker: int
     text: str
     name: str = ""
+    emotion: str = ""
 
     @property
     def is_narration(self) -> bool:
@@ -257,6 +260,7 @@ def _normalize_dialogue(
     for item in raw:
         speaker_raw: object = None
         text = ""
+        emotion = ""
         if isinstance(item, str):
             speaker_raw, text = _split_speaker_text(item, characters)
         elif isinstance(item, dict):
@@ -266,11 +270,12 @@ def _normalize_dialogue(
             speaker_raw = item.get(
                 "speaker", item.get("character", item.get("role", item.get("name")))
             )
+            emotion = str(item.get("emotion") or "").strip()
         if not text:
             continue
         speaker = _resolve_speaker(speaker_raw, characters, fixes)
         name = characters[speaker].name if speaker in characters else ""
-        lines.append(Line(speaker=speaker, text=text, name=name))
+        lines.append(Line(speaker=speaker, text=text, name=name, emotion=emotion))
     return lines
 
 

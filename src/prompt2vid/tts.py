@@ -50,6 +50,22 @@ DEFAULT_CHARACTER_VOICES = (
     "zh-CN-YunxiaNeural",       # 男童
     "zh-CN-XiaomengNeural",     # 女童
 )
+
+# IndexTTS-2.5 角色音色轮转表（插件 TimbreModel 目录标准自带的音色文件，
+# 男女交替；分镜角色卡没写 timbre 时按角色 id 轮转，保证不同角色不同嗓
+# 子）。音色是内容盲的（不看性别），角色卡写 timbre 可按人设精挑。
+# 个别安装缺某个文件时该句自动降级 edge-tts，不影响出片。
+# PROMPT2VID_TTS_TIMBRES 可用逗号列表覆盖。
+DEFAULT_CHARACTER_TIMBRES = (
+    "钟离.wav",            # 男声（低沉威严、帝王气度）
+    "御姐配音.wav",         # 女声（成熟御姐）
+    "温润男声.mp3",         # 男声（温润）
+    "甜美女声.mp3",         # 女声（甜美）
+    "播音中年男.mp3",        # 男声（中年播报）
+    "阅历姐姐.mp3",         # 女声（沉稳阅历）
+    "随性男青.mp3",         # 男声（随性青年）
+    "温柔学姐.mp3",         # 女声（温柔学姐）
+)
 # 静音占位：8kHz 单声道 1 秒的极小 MP3 帧
 _SILENT_MP3 = (
     b"\xff\xfb\x90\x00" + b"\x00" * 413
@@ -61,12 +77,16 @@ ENGINE_ORDER = ("comfyui", "edge", "gateway", "piper")
 # ComfyUI IndexTTS-2.5 可用性探测缓存（None = 未探测；进程内只探一次，
 # 避免逐镜配音都等服务端 object_info）
 _COMFYUI_TTS_OK: bool | None = None
+# 情感节点（IndexTTS25EmotionTextNode）探测缓存，语义同上
+_EMOTION_NODE_OK: bool | None = None
 
 
 def reset_engine_cache() -> None:
     """清空引擎可用性缓存（测试切换环境变量后调用）。"""
     global _COMFYUI_TTS_OK
+    global _EMOTION_NODE_OK
     _COMFYUI_TTS_OK = None
+    _EMOTION_NODE_OK = None
 
 
 def _engine_list() -> list[str]:
@@ -106,17 +126,17 @@ def voice_for_speaker(speaker_id: int) -> str:
 
 
 def timbre_for_speaker(speaker_id: int) -> str:
-    """返回某发言人应使用的 IndexTTS 音色文件名（空 = 用全局音色）。
+    """返回某发言人应使用的 IndexTTS 音色文件名。
 
-    IndexTTS 的音色是插件目录里的文件，无法凭空推测文件名，因此只有
-    显式配置 PROMPT2VID_TTS_TIMBRES（逗号列表，按角色 id 顺序）或分镜
-    角色卡写了 timbre 时才会按角色区分。
+    角色卡写了 timbre 或显式配置 PROMPT2VID_TTS_TIMBRES（逗号列表，
+    按角色 id 顺序）时优先；否则按角色 id 在 DEFAULT_CHARACTER_TIMBRES
+    轮转，保证不同角色不同嗓子（与 edge-tts 的 voice 轮转同构）。
+    旁白（id=0）返回空字符串：用全局 PROMPT2VID_TTS_TIMBRE，与旁白
+    铺底的定位一致。
     """
     if speaker_id <= 0:
         return ""
-    palette = _env_list("PROMPT2VID_TTS_TIMBRES")
-    if not palette:
-        return ""
+    palette = _env_list("PROMPT2VID_TTS_TIMBRES") or list(DEFAULT_CHARACTER_TIMBRES)
     return palette[(speaker_id - 1) % len(palette)]
 
 
@@ -146,6 +166,22 @@ def _comfyui_tts_available() -> bool:
     return _COMFYUI_TTS_OK
 
 
+def _emotion_node_available() -> bool:
+    """探测情感节点（IndexTTS25EmotionTextNode，2.5 版插件才有）。"""
+    global _EMOTION_NODE_OK
+    if _EMOTION_NODE_OK is not None:
+        return _EMOTION_NODE_OK
+    _EMOTION_NODE_OK = False
+    try:
+        from .comfyui_client import ComfyUIClient
+
+        with ComfyUIClient() as client:
+            _EMOTION_NODE_OK = client.node_exists("IndexTTS25EmotionTextNode")
+    except Exception:  # noqa: BLE001 - ComfyUI 不可达按无情感节点处理
+        _EMOTION_NODE_OK = False
+    return _EMOTION_NODE_OK
+
+
 def _finalize_audio(wav: Path, dest: Path, bitrate: str = "192k") -> bool:
     """把 wav 转码为 mp3 落到 dest（manifest 约定 mp3）。
 
@@ -163,11 +199,13 @@ def _finalize_audio(wav: Path, dest: Path, bitrate: str = "192k") -> bool:
     return dest.is_file() and dest.stat().st_size > 0
 
 
-def _tts_via_comfyui(text: str, dest: Path, timbre: str = "") -> bool:
+def _tts_via_comfyui(text: str, dest: Path, timbre: str = "", emotion: str = "") -> bool:
     """ComfyUI IndexTTS-2.5 配音（本地显卡推理，中文自然度最佳）。
 
     timbre 为该句指定的插件音色文件名（不同角色用不同嗓子）；
     空串时回退到 PROMPT2VID_TTS_TIMBRE 全局音色。
+    emotion 为该句的情感描述（IndexTTS25EmotionTextNode）；
+    服务器缺情感节点时自动去掉 emotion 走 BaseNode（日志告警一次）。
     """
     if not _comfyui_tts_available():
         return False
@@ -176,6 +214,13 @@ def _tts_via_comfyui(text: str, dest: Path, timbre: str = "") -> bool:
         build_tts_workflow,
         run_workflow,
     )
+
+    if emotion and not _emotion_node_available():
+        logger.warning(
+            "ComfyUI 缺 IndexTTS25EmotionTextNode 节点（插件版本较旧），"
+            "情感控制不可用，按无情感合成"
+        )
+        emotion = ""
 
     wav = dest.with_suffix(".comfyui.wav")
     try:
@@ -189,6 +234,7 @@ def _tts_via_comfyui(text: str, dest: Path, timbre: str = "") -> bool:
                     text=text,
                     reference_audio=reference,
                     timbre=timbre or None,
+                    emotion=emotion or None,
                 )
             )
             run_workflow(workflow, wav, client=client)
@@ -296,12 +342,15 @@ def synthesize_audio(
     voice: str = "",
     rate: str = "",
     timbre: str = "",
+    emotion: str = "",
 ) -> Path:
     """把文本合成为音频文件（IndexTTS-2.5 → edge-tts → 网关 → piper → 静音）。
 
     引擎选择见模块 docstring；每次降级都会写 warning 日志。
     voice 仅对 edge-tts 生效（该句的音色）；timbre 仅对 IndexTTS 生效
-    （插件音色文件名）。两者都为空时用环境变量的全局音色。
+    （插件音色文件名）；emotion 仅对 IndexTTS 生效（该句的情感描述，
+    空串时读 PROMPT2VID_TTS_EMOTION 全局描述）。两者都为空时用环境
+    变量的全局音色。
 
     Returns:
         保存后的音频绝对路径。
@@ -310,7 +359,7 @@ def synthesize_audio(
     dest.parent.mkdir(parents=True, exist_ok=True)
 
     for engine in _engine_list():
-        if engine == "comfyui" and _tts_via_comfyui(text, dest, timbre):
+        if engine == "comfyui" and _tts_via_comfyui(text, dest, timbre, emotion):
             return dest.resolve()
         if engine == "edge" and _tts_via_edge(text, dest, voice, rate):
             return dest.resolve()

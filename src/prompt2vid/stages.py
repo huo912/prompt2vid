@@ -511,7 +511,8 @@ def _voiceover_dialogue(
         if not (dest.is_file() and dest.stat().st_size > 0):
             voice, timbre = _line_voice(characters.get(line.speaker), line.speaker)
             tts.synthesize_audio(
-                text=line.text, dest=dest, voice=voice, timbre=timbre
+                text=line.text, dest=dest, voice=voice, timbre=timbre,
+                emotion=line.emotion,
             )
             rebuilt = True
         line_paths.append(dest)
