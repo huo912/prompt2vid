@@ -47,7 +47,8 @@
   到 720 宽。这是本档最重要的观感杠杆——480 宽直接投流会被平台
   播放器粗暴拉伸，主动放大 + 锐化明显更好；不新增细节但观感接近原生；
 - `PROMPT2VID_SMOOTH_FPS=50`（可选开）：纯 CPU 补帧，不占显存。
-  运镜/平移镜头流畅度提升肉眼可见；快速打斗类画面可能形变，按题材取舍；
+  运镜/平移镜头流畅度提升肉眼可见；但人物镜头（脸、手指、衣摆）会被
+  插值出鬼影和扭曲，有人物就别开；
 - IPAdapter 关闭是对的：8GB 上 T2I+IPAdapter 大概率 OOM，角色一致性
   交给分镜表 `characters` 角色卡的文字契约（默认层）；
 - 不要尝试把 `COMFYUI_LTX_MAX_PIXELS` 拉过 45 万：2B 在 8GB 上
@@ -95,7 +96,9 @@
 | `PROMPT2VID_X264_PRESET` | medium | 成片编码预设。`medium` 比 `fast` 同画质省 10-15% 码率；赶时间可回 `fast` |
 | `PROMPT2VID_UPSCALE` | 空 | 成片放大目标（`720` 或 `720x1280`）。lanczos + 轻锐化，字幕按最终分辨率烧录；源已达标自动跳过 |
 | `PROMPT2VID_UPSCALE_SHARPEN` | 0.3 | 放大后锐化强度，0 关闭。动漫线条对锐化敏感，出现白边就调低 |
-| `PROMPT2VID_SMOOTH_FPS` | 空 | CPU 补帧（minterpolate）。建议 50；快速运动画面可能形变 |
+| `PROMPT2VID_SMOOTH_FPS` | 空 | CPU 补帧（minterpolate）。建议 50，**但人物镜头会被插值出鬼影/扭曲**（脸、手指、衣摆），只在纯风景/固定机位时开 |
+| `PROMPT2VID_PAD_MODE` | slow | 配音比片段长时怎么补画面：`slow`=先降速（上限 `PROMPT2VID_PAD_SLOW_MAX`，默认 1.3）再定格，画面始终正向运动；`freeze`=直接定格；`pingpong`=末段倒放（旧默认，会让嘴型/肢体倒退，别用） |
+| `PROMPT2VID_AUDIO_SPEEDUP_MAX` | 1.2 | 配音明显超长时先给旁白提速（atempo 变速不变调），比长时间定格好；设 1 关闭 |
 | `COMFYUI_T2I_CFG` | 7 | SDXL Base 用 7；RealVisXL 等写实系用 6 左右 |
 | `COMFYUI_T2I_SAMPLER` / `_SCHEDULER` | dpmpp_2m / karras | 一般无需改 |
 | `COMFYUI_LTX_MAX_SHIFT` / `_BASE_SHIFT` | 2.05 / 0.95 | LTX 噪声调度（官方 simple 工作流按 512-768p 调校）。720p 长镜头若出现结构漂移，可尝试 max_shift 2.2-2.4 |
@@ -108,7 +111,8 @@
 
 1. **IndexTTS-2.5**（ComfyUI 本地推理，中文自然度最佳；自带 59 个音色，
    支持克隆自定义声音，约需 12GB 显存。安装见
-   [LOCAL_SETUP.md §7](LOCAL_SETUP.md)）；
+   [LOCAL_SETUP.md §7](LOCAL_SETUP.md)。首次调用要加载全部子模型，约 5 分钟，
+   之后同进程单句 3-11 秒）；
 2. **edge-tts**（微软公网语音，公司网络拦 WSS 时 403）；
 3. **OpenAI 兼容网关**（`PROMPT2VID_TTS_BASE_URL` 指向 `/audio/speech` 接口）；
 4. **piper 本地离线**（`pip install piper-tts`，音色 onnx 放 `models/tts/`，
@@ -258,13 +262,16 @@ curl -L -o models/tts/zh_CN-huayan-medium.onnx.json \
 | 症状 | 原因 | 处理 |
 |------|------|------|
 | 配音像读课文 | 采样用束搜索 + 无情感控制 | 已默认关束搜索 + EmotionTextNode 全局基调；台词逐句写 `emotion` 短语按句调语气 |
-| 每镜结尾卡一下再切 | 过渡垫片是定格末帧 | 已默认 pingpong 垫片（末段倒放续接，`PROMPT2VID_PAD_MODE` 可回退 freeze） |
-| 成片无旁白（有字幕没人声） | edge-tts 被网络拦截（403）→ 静音占位 | 本地 piper 离线配音（见上文 §配音）；质检的 `voiceover_audible` 会明确报出 |
+| 每镜结尾卡一下再切 | 过渡垫片是定格末帧 | 过渡垫片已独立为 `freeze_seconds`（只定格、不参与配音补长）；配音超长补长的垫片默认 `PROMPT2VID_PAD_MODE=slow`（先降速再定格），避免倒放 |
+| 口型和音频对不上 | ① 配音比片段长时旧默认 `pingpong` 会倒放末段，嘴型倒退 ② 分镜时长没覆盖台词 ③ 未装口型同步节点 | ① 已默认 `slow` 垫片（画面始终正向，`PROMPT2VID_PAD_MODE`）② 分镜时长自动按台词估算抬高，超长旁白先提速（`PROMPT2VID_AUDIO_SPEEDUP_MAX`，默认 1.2）③ 装 LatentSync（见 [LOCAL_SETUP.md §8](LOCAL_SETUP.md)），动漫/侧脸镜头不适用 |
+| 人物某个部位变形/鬼影 | 补帧 minterpolate 在脸、手指、衣摆上插出伪影 | 默认关闭 `PROMPT2VID_SMOOTH_FPS`；只在纯风景/固定机位时开 |
+| 成片无旁白（有字幕没人声） | TTS 全部失败 → 静音占位（edge-tts 被拦 403 最常见） | 装 IndexTTS-2.5 本地推理（首选，见 [LOCAL_SETUP.md §7](LOCAL_SETUP.md)）；或本地 piper 离线配音（见上文 §配音）；质检的 `voiceover_audible` 会明确报出 |
 | 成片有持续底噪/嗡声 | 旧版 loudnorm 把静音占位的量化噪声满增益放大 | 已修复（静音输入直接输出纯静音）；老运行用 `--resume --from render` 重渲染 |
 | 镜头切换生硬 | 渲染默认硬切 | `PROMPT2VID_TRANSITION`（默认已开 0.5s 叠化，见上文 §镜头过渡） |
 | 暗部/天空出现色带 | 中转 WEBM CRF 32 旧默认 | 已默认改 20；老运行目录用 `--force` 重跑 clips |
 | 成片比预览糊 | 两代 CRF 23 转码叠加 | 已分层为 16/18；确认没把 CRF 手动调高 |
-| 画面卡顿不跟手 | 25fps 原生帧率 | `PROMPT2VID_SMOOTH_FPS=50`（或 RIFE） |
+| 画面卡顿不跟手 | 25fps 原生帧率 | `PROMPT2VID_SMOOTH_FPS=50`（或 RIFE），人物镜头别开 |
+| 播放器里没声音 | `final.mp4` 有 aac 音轨；`final/merged.mp4` 是无声中间产物 | 播 `final/final.mp4`；`python -c "from prompt2vid import ffmpeg_ops; print(ffmpeg_ops.probe_file('…/final.mp4'))"` 看到 `has_audio: True` 即正常 |
 | 人物被裁/比例失真 | 首帧与视频画幅不一致 | 保持 `COMFYUI_T2I_WIDTH/HEIGHT` 默认，勿手设 `COMFYUI_LTX_WIDTH` |
 | 手指/肢体崩坏 | LTX 常见问题 | 已默认注入肢体稳定提示词（`COMFYUI_LTX_PROMPT_SUFFIX`）；13B 档明显好于 2B；换镜别硬重试，改运动描述 |
 | 全片风格不统一 | LLM 提示词漂移 | `PROMPT2VID_STYLE` + LoRA（两层硬约束，见 style.py） |

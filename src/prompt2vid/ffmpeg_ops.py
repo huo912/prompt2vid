@@ -31,6 +31,17 @@ DEFAULT_X264_PRESET = "medium"
 # 设 0 关闭锐化。
 DEFAULT_UPSCALE_SHARPEN = 0.3
 
+# 片段补长策略（normalize_clip）。配音比画面长时必须把视频撑到配音长度，
+# 三种做法差异极大：
+# - slow（默认）：先降速（上限 PROMPT2VID_PAD_SLOW_MAX，默认 1.3 倍时长），
+#   剩余用定格末帧补齐。画面始终正向运动，嘴型继续往前走，只是节奏变慢；
+# - freeze：直接定格末帧（观感「卡住」，但不会倒放）；
+# - pingpong：末段倒放续接（旧默认）。倒放会让嘴型/肢体回退——旁白还在
+#   继续念，画面里的人却在倒着动，既像「口型对不上」又像「身体变形」，
+#   仅在明确要这种迷因效果时才用。
+DEFAULT_PAD_MODE = "slow"
+DEFAULT_PAD_SLOW_MAX = 1.3
+
 
 def _env_float(name: str, default: float) -> float:
     try:
@@ -393,25 +404,38 @@ def build_srt(
     return dest
 
 
-def normalize_clip(clip: str | Path, dest: str | Path, extend_seconds: float = 0.0) -> Path:
+def normalize_clip(
+    clip: str | Path,
+    dest: str | Path,
+    extend_seconds: float = 0.0,
+    *,
+    freeze_seconds: float = 0.0,
+    pad_mode: str | None = None,
+) -> Path:
     """统一转码为 h264/yuv420p 无音轨 mp4（concat 前提），保持生成帧率。
 
     - 帧率与 LTX 输出一致（COMFYUI_LTX_FPS，默认 25），不再硬编码；
     - 中转质量默认 CRF 16（PROMPT2VID_CLIP_CRF 可调）：中转片段之后还要
       再经成片转码，这里保持高质量避免两代有损叠加；
-    - extend_seconds > 0 时延长片段（配音比片段长、xfade 过渡垫片）：
-      默认往返（PROMPT2VID_PAD_MODE=pingpong）——末段倒放续接，运动
-      连续地穿过过渡/配音尾段，比定格末帧自然（定格会在每镜结尾出现
-      「卡一下再切」的生硬感）；设 freeze 回退定格（tpad clone）；
+    - extend_seconds > 0 时延长片段（配音比片段长）：默认降速
+      （PROMPT2VID_PAD_MODE=slow）——先按最长 PROMPT2VID_PAD_SLOW_MAX 倍
+      拉长，不足部分定格末帧，画面全程正向运动；freeze 直接定格；
+      pingpong 倒放末段（旧默认，会让嘴型/肢体回退，不推荐）；
+    - freeze_seconds > 0 时在末尾再定格补齐（镜头过渡垫片用：xfade 的
+      重叠正好吃掉这段垫片，音轨/字幕时间轴不变）；
     - PROMPT2VID_SMOOTH_FPS > 源帧率时启用 minterpolate 补帧（纯 CPU，
-      不占显存；运镜/平移镜头的流畅度提升明显，快速运动可能产生形变，
-      默认关闭）。建议 50（25fps 翻倍）。
+      不占显存；运镜/平移镜头的流畅度提升明显，但快速运动/人物肢体
+      会插值出鬼影和扭曲，默认关闭）。建议 50（25fps 翻倍）仅在
+      纯风景/固定机位时开启。
     """
     dest = Path(dest)
     dest.parent.mkdir(parents=True, exist_ok=True)
     fps = _env_float("COMFYUI_LTX_FPS", 25.0) or 25.0
     smooth_fps = _env_float("PROMPT2VID_SMOOTH_FPS", 0.0)
     crf = _env_float("PROMPT2VID_CLIP_CRF", DEFAULT_CLIP_CRF)
+    mode = (pad_mode or os.getenv("PROMPT2VID_PAD_MODE", DEFAULT_PAD_MODE) or "").strip().lower()
+    if mode not in {"slow", "freeze", "pingpong"}:
+        mode = DEFAULT_PAD_MODE
     args = ["-i", str(clip), "-c:v", "libx264", "-preset", "fast",
             "-crf", f"{crf:g}", "-pix_fmt", "yuv420p"]
     filters: list[str] = []
@@ -421,11 +445,10 @@ def normalize_clip(clip: str | Path, dest: str | Path, extend_seconds: float = 0
             "mc_mode=aobmc:me_mode=bidir:vsbmc=1"
         )
     if extend_seconds > 0.01:
-        pad_mode = os.getenv("PROMPT2VID_PAD_MODE", "pingpong").strip().lower() or "pingpong"
-        if pad_mode == "pingpong":
-            # 末段倒放续接：运动连续穿过过渡，替代定格末帧。
-            # 结尾补 fps 归一化——reverse/setpts 会让时间戳有 ~0.5% 漂移，
-            # 多镜累积下来 xfade 会与音轨错位
+        if mode == "pingpong":
+            # 末段倒放续接（旧行为，保留兼容）。结尾补 fps 归一化——
+            # reverse/setpts 会让时间戳有 ~0.5% 漂移，多镜累积下来
+            # xfade 会与音轨错位
             out_fps = smooth_fps if smooth_fps > fps * 1.05 else fps
             filters.append(
                 f"split[pp_main][pp_rev];"
@@ -434,8 +457,26 @@ def normalize_clip(clip: str | Path, dest: str | Path, extend_seconds: float = 0
                 f"[pp_main][pp_tail]concat=n=2:v=1:a=0,"
                 f"fps={out_fps:g}"
             )
-        else:
+        elif mode == "freeze":
             filters.append(f"tpad=stop_mode=clone:stop_duration={extend_seconds:.3f}")
+        else:
+            remaining = extend_seconds
+            base = 0.0
+            try:
+                base = float(probe_file(clip)["duration_seconds"])
+            except (RuntimeError, FileNotFoundError):
+                base = 0.0
+            ratio_max = max(1.0, _env_float("PROMPT2VID_PAD_SLOW_MAX", DEFAULT_PAD_SLOW_MAX))
+            if base > 0.05 and ratio_max > 1.001:
+                # 降速到刚好补满（不超过 ratio_max 倍时长）
+                ratio = min(1.0 + extend_seconds / base, ratio_max)
+                if ratio > 1.001:
+                    filters.append(f"setpts={ratio:.4f}*PTS")
+                    remaining = max(0.0, extend_seconds - base * (ratio - 1.0))
+            if remaining > 0.05:
+                filters.append(f"tpad=stop_mode=clone:stop_duration={remaining:.3f}")
+    if freeze_seconds > 0.01:
+        filters.append(f"tpad=stop_mode=clone:stop_duration={freeze_seconds:.3f}")
     if filters:
         # 逗号衔接：minterpolate 的输出线性接进 split；pingpong 图内部的
         # 分支已用分号+标签自成一体（整图单输入单输出，-vf 可用）
@@ -606,11 +647,20 @@ def merge_with_transitions(
     return dest
 
 
-def fit_audio(audio: str | Path | None, duration: float, dest: str | Path) -> Path:
+def fit_audio(
+    audio: str | Path | None,
+    duration: float,
+    dest: str | Path,
+    *,
+    speedup: float = 1.0,
+) -> Path:
     """把音频对齐到指定时长：长则截断、短则静音填充，输出统一 wav。
 
     音频经响度归一（loudnorm，-16 LUFS，edge-tts 输出偏轻）；
     音频缺失时生成等时长静音。
+
+    speedup > 1 时先用 atempo 提速（变速不变调）压短旁白——比让画面
+    定格/降速拖长更贴合口型；调用方负责把该系数写进字幕时间轴。
 
     注意：输入本身接近无声（TTS 被网络拦截时的静音占位）时直接输出
     纯静音——loudnorm 会对无声输入满增益，把量化底噪放大成恒定噪声
@@ -619,6 +669,9 @@ def fit_audio(audio: str | Path | None, duration: float, dest: str | Path) -> Pa
     dest = Path(dest)
     dest.parent.mkdir(parents=True, exist_ok=True)
     dur = f"{max(0.1, duration):.3f}"
+    tempo = ""
+    if speedup > 1.001:
+        tempo = f"atempo={min(2.0, speedup):.4f},"
     audio = Path(audio) if audio else None
     if audio is not None and audio.is_file():
         max_volume = audio_max_volume(audio)
@@ -627,7 +680,7 @@ def fit_audio(audio: str | Path | None, duration: float, dest: str | Path) -> Pa
                         "-t", dur, str(dest)])
             return dest
         run_ffmpeg(["-i", str(audio),
-                    "-af", "loudnorm=I=-16:TP=-1.5:LRA=11,apad", "-t", dur,
+                    "-af", f"{tempo}loudnorm=I=-16:TP=-1.5:LRA=11,apad", "-t", dur,
                     "-ar", "44100", "-ac", "1", str(dest)])
     else:
         run_ffmpeg(["-f", "lavfi", "-i", "anullsrc=r=44100:cl=mono",

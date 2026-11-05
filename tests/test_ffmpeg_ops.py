@@ -251,18 +251,52 @@ def test_normalize_clip_quality_defaults(monkeypatch, tmp_path):
 def test_normalize_clip_smooth_fps_and_extend(monkeypatch, tmp_path):
     seen = _capture_ffmpeg_args(monkeypatch)
     monkeypatch.setenv("PROMPT2VID_SMOOTH_FPS", "50")
+    # 探针拿到源时长后 slow 垫片才有可算的降速比
+    monkeypatch.setattr(
+        ffmpeg_ops,
+        "probe_file",
+        lambda p: {"duration_seconds": 4.0, "has_audio": False},
+    )
     ffmpeg_ops.normalize_clip(
         tmp_path / "in.webm", tmp_path / "out.mp4", extend_seconds=1.5
     )
     joined = " ".join(seen[-1])
     assert "minterpolate=fps=50" in joined
-    # 默认 pingpong 垫片：末段倒放续接（split/reverse/concat），不是定格
-    assert "reverse,trim=duration=1.500" in joined
-    assert "concat=n=2:v=1:a=0" in joined
-    assert "fps=50" in joined              # concat 后帧率归一化（防时间戳漂移）
-    assert "tpad" not in joined
+    # 默认 slow 垫片：先整体降速（setpts），剩余部分定格，绝不倒放
+    assert "setpts=" in joined
+    assert "tpad=stop_mode=clone" in joined
+    assert "reverse" not in joined
+    assert "fps=50" in joined              # 补帧后帧率归一化（防时间戳漂移）
     # 补帧时输出帧率由 minterpolate 决定，不再叠加 -r 做二次重采样
     assert " -r " not in f" {joined} "
+
+
+def test_normalize_clip_pad_mode_pingpong(monkeypatch, tmp_path):
+    """PROMPT2VID_PAD_MODE=pingpong 才回退末段倒放（旧行为，仅兼容旧配置）。"""
+    seen = _capture_ffmpeg_args(monkeypatch)
+    monkeypatch.setenv("PROMPT2VID_PAD_MODE", "pingpong")
+    ffmpeg_ops.normalize_clip(
+        tmp_path / "in.webm", tmp_path / "out.mp4", extend_seconds=1.5
+    )
+    joined = " ".join(seen[-1])
+    assert "reverse,trim=duration=1.500" in joined
+    assert "concat=n=2:v=1:a=0" in joined
+    assert "tpad" not in joined
+
+
+def test_normalize_clip_freeze_pad_for_transition(monkeypatch, tmp_path):
+    """freeze_seconds 只用于过渡垫片，不与配音超长垫片混用。"""
+    seen = _capture_ffmpeg_args(monkeypatch)
+    monkeypatch.setenv("PROMPT2VID_PAD_MODE", "freeze")
+    ffmpeg_ops.normalize_clip(
+        tmp_path / "in.webm",
+        tmp_path / "out.mp4",
+        extend_seconds=1.5,
+        freeze_seconds=0.5,
+    )
+    joined = " ".join(seen[-1])
+    assert "tpad=stop_mode=clone:stop_duration=1.500" in joined
+    assert "tpad=stop_mode=clone:stop_duration=0.500" in joined
 
 
 def test_normalize_clip_pad_mode_freeze(monkeypatch, tmp_path):

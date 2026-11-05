@@ -105,12 +105,14 @@ def _install_ffmpeg_mocks(monkeypatch, clip_durations: dict[int, float],
         path.write_bytes(b"x")
         return path
 
-    def fake_fit_audio(audio, duration, dest):
+    def fake_fit_audio(audio, duration, dest, *, speedup=1.0):
         events.append(("fit_audio", Path(audio).name if audio else None, round(duration, 1)))
         return touch(dest)
 
-    def fake_normalize(clip, dest, extend_seconds=0.0):
+    def fake_normalize(clip, dest, extend_seconds=0.0, *, freeze_seconds=0.0,
+                       pad_mode=None):
         events.append(("normalize", Path(clip).name, round(extend_seconds, 1)))
+        events.append(("normalize_freeze", Path(clip).name, round(freeze_seconds, 1)))
         return touch(dest)
 
     def fake_concat(items, dest, **kwargs):
@@ -162,9 +164,10 @@ def test_render_final_orchestration(render_workspace, monkeypatch):
 
 
 def test_render_final_extends_video_when_audio_longer(render_workspace, monkeypatch):
-    """配音比片段长 → 定格延长视频而不是截断配音。"""
+    """配音比片段长 → 先提速旁白（上限内）再补长画面，配音不被截断。"""
     ws = render_workspace
-    # 镜 1 配音 5s > 片段 2s → 延长 3s；镜 2 无配音
+    # 镜 1 配音 5s > 片段 2s，提速上限 1.2 → 配音压到 4.2s，画面补 2.2s
+    monkeypatch.setenv("PROMPT2VID_AUDIO_SPEEDUP_MAX", "1.2")
     events = _install_ffmpeg_mocks(
         monkeypatch, clip_durations={1: 2.0, 2: 3.0}, audio_durations={1: 5.0}
     )
@@ -172,20 +175,38 @@ def test_render_final_extends_video_when_audio_longer(render_workspace, monkeypa
     report = stages.render_final()
 
     assert "error" not in report
-    # 片段 1 定格延长 3s，片段 2 不延长
-    assert ("normalize", "shot_1.webm", 3.0) in events
+    assert ("normalize", "shot_1.webm", 2.2) in events
     assert ("normalize", "shot_2.webm", 0.0) in events
-    # 音频对齐到 5s（配音不被截断）
-    assert ("fit_audio", "shot_1.mp3", 5.0) in events
-    # 报告记录超长信息
+    # 音频对齐到提速后的 4.2s（配音不被截断）
+    assert ("fit_audio", "shot_1.mp3", 4.2) in events
+    # 报告记录超长信息（含提速倍数）
     overruns = report["audio_overruns"]
     assert len(overruns) == 1
     assert overruns[0]["id"] == 1
-    assert overruns[0]["extended_seconds"] == 3.0
-    # SRT 时间轴按延长后的时长（镜 1: 0-5s，镜 2: 5-8s）
+    assert overruns[0]["speedup"] == 1.2
+    assert overruns[0]["extended_seconds"] == 2.17
+    # SRT 时间轴按补长后的时长（镜 1: 0-4.167s，镜 2: 4.167-7.167s）
+    srt = (ws / "final" / "final.srt").read_text(encoding="utf-8")
+    assert "00:00:00,000 --> 00:00:04,167" in srt
+    assert "00:00:04,167 --> 00:00:07,167" in srt
+
+
+def test_render_final_disables_speedup(render_workspace, monkeypatch):
+    """PROMPT2VID_AUDIO_SPEEDUP_MAX=1 关掉提速：退回纯补长画面。"""
+    ws = render_workspace
+    monkeypatch.setenv("PROMPT2VID_AUDIO_SPEEDUP_MAX", "1")
+    events = _install_ffmpeg_mocks(
+        monkeypatch, clip_durations={1: 2.0, 2: 3.0}, audio_durations={1: 5.0}
+    )
+
+    report = stages.render_final()
+
+    assert "error" not in report
+    assert ("normalize", "shot_1.webm", 3.0) in events
+    assert ("fit_audio", "shot_1.mp3", 5.0) in events
+    assert report["audio_overruns"][0]["extended_seconds"] == 3.0
     srt = (ws / "final" / "final.srt").read_text(encoding="utf-8")
     assert "00:00:00,000 --> 00:00:05,000" in srt
-    assert "00:00:05,000 --> 00:00:08,000" in srt
 
 
 def test_render_final_with_bgm(render_workspace, monkeypatch):
@@ -296,10 +317,13 @@ def test_render_final_transitions_between_shots(render_workspace, monkeypatch):
 
     report = stages.render_final()
 
-    # 非末段镜头（镜 1）的规范化带 0.5s 垫片；末段（镜 2）不带
-    normalizes = [(e[1], e[2]) for e in events if e[0] == "normalize"]
-    assert ("shot_1.webm", 0.5) in normalizes
-    assert ("shot_2.webm", 0.0) in normalizes
+    # 非末段镜头（镜 1）的规范化带 0.5s 定格垫片；末段（镜 2）不带。
+    # 过渡垫片走 freeze_seconds（定格），不与配音超长垫片（extend_seconds）混用
+    freezes = [(e[1], e[2]) for e in events if e[0] == "normalize_freeze"]
+    assert ("shot_1.webm", 0.5) in freezes
+    assert ("shot_2.webm", 0.0) in freezes
+    extends = [(e[1], e[2]) for e in events if e[0] == "normalize"]
+    assert all(sec == 0.0 for _, sec in extends)
     # xfade 链：offset = 2.0 - 1*0.5 = 1.5（音轨时间轴的衔接点）
     assert len(merges) == 1
     assert merges[0]["clips"] == ["clip_1.mp4", "clip_2.mp4"]

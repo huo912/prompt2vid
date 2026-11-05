@@ -245,6 +245,17 @@ def _tts_via_comfyui(text: str, dest: Path, timbre: str = "", emotion: str = "")
     return _finalize_audio(wav, dest)
 
 
+def _edge_hint(exc: Exception) -> str:
+    """把 edge-tts 的典型失败翻译成可执行提示（省得翻文档猜）。"""
+    msg = str(exc)
+    if "403" in msg:
+        # 微软按客户端版本校验 Sec-MS-GEC 令牌：旧版 edge-tts 一律 403
+        return "；403 多为 edge-tts 版本过期，`pip install -U edge-tts`（>=7.3.1）"
+    if "Proxy" in msg or "proxy" in msg or "Connect" in msg:
+        return "；网络不可达，可设 EDGE_TTS_PROXY 走代理"
+    return ""
+
+
 def _tts_via_edge(text: str, dest: Path, voice: str = "", rate: str = "") -> bool:
     """edge-tts 配音（微软公网语音，网络可达时音质尚可）。"""
     voice_name = voice or os.getenv("EDGE_TTS_VOICE", "").strip() or DEFAULT_VOICE
@@ -257,7 +268,7 @@ def _tts_via_edge(text: str, dest: Path, voice: str = "", rate: str = "") -> boo
         )
         asyncio.run(communicate.save(str(dest)))
     except Exception as exc:  # noqa: BLE001 - edge-tts 不可用时走回退链
-        logger.warning("edge-tts 配音失败（%s），尝试下一级回退", exc)
+        logger.warning("edge-tts 配音失败（%s）%s，尝试下一级回退", exc, _edge_hint(exc))
         return False
     return dest.is_file() and dest.stat().st_size > 0
 
@@ -312,18 +323,26 @@ def _tts_via_piper(text: str, dest: Path) -> bool:
     if not model:
         return False
     wav = dest.with_suffix(".piper.wav")
+    # Windows 上 piper 的入口脚本用 locale（cp936）解码 stdin，中文文本变
+    # 乱码 → espeak 产出空音素 → 一个采样都不写就退出（wave 报
+    # `# channels not specified`）。强制子进程按 UTF-8 读 stdin。
+    env = {**os.environ, "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"}
     try:
         result = subprocess.run(
             [exe, "--model", model, "--output_file", str(wav)],
             input=text, capture_output=True, text=True,
-            encoding="utf-8", timeout=600.0,
+            encoding="utf-8", timeout=600.0, env=env,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         logger.warning("piper 配音失败（%s），尝试下一级回退", exc)
         return False
     if result.returncode != 0 or not (wav.is_file() and wav.stat().st_size > 0):
         wav.unlink(missing_ok=True)
-        logger.warning("piper 配音失败（exit %s），尝试下一级回退", result.returncode)
+        tail = (result.stderr or "").strip().splitlines()[-1:]
+        logger.warning(
+            "piper 配音失败（exit %s%s），尝试下一级回退",
+            result.returncode, f"：{tail[0]}" if tail else "",
+        )
         return False
     return _finalize_audio(wav, dest, bitrate="128k")
 

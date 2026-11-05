@@ -412,3 +412,45 @@ def test_spoken_lines_prefers_dialogue(tmp_path: Path):
     assert shot.has_dialogue is True
     assert [line.text for line in shot.spoken_lines()] == ["他抬头看天。"]
 
+
+def test_estimate_speech_seconds_counts_lines_and_gaps():
+    lines = [storyboard.Line(speaker=1, text="一二三四五六七八"), storyboard.Line(speaker=0, text="九十")]
+    expected = 10 / storyboard.SPEECH_CHARS_PER_SECOND + storyboard.SPEECH_LINE_GAP_SECONDS + storyboard.SPEECH_TAIL_SECONDS
+    assert storyboard.estimate_speech_seconds(lines) == pytest.approx(expected)
+    # 没有台词行时回退到整镜旁白
+    assert storyboard.estimate_speech_seconds(None, "一二三四五") == pytest.approx(
+        5 / storyboard.SPEECH_CHARS_PER_SECOND + storyboard.SPEECH_TAIL_SECONDS
+    )
+    assert storyboard.estimate_speech_seconds([], "") == 0.0
+
+
+def test_shot_duration_raised_to_cover_dialogue(tmp_path: Path):
+    """分镜时长给短了 → 按台词语速抬到够用（受 MAX_SHOT_SECONDS 约束）。"""
+    data = {
+        "shots": [
+            {
+                "id": 1,
+                "narration": "",
+                "visual": "老者在殿前说话",
+                "image_prompt": "old man in palace hall",
+                "motion_prompt": "slow push in",
+                "duration_seconds": 3,
+                "dialogue": [{"speaker": "旁白", "text": "人" * 20}],
+            },
+            {
+                "id": 2,
+                "narration": "短",
+                "visual": "空镜",
+                "image_prompt": "empty hall",
+                "motion_prompt": "static",
+                "duration_seconds": 3,
+            },
+        ]
+    }
+    path = _write(tmp_path / "storyboard.json", json.dumps(data, ensure_ascii=False))
+    shots = storyboard.load_storyboard(path)
+    assert shots[0].duration_seconds > 3
+    assert shots[0].duration_seconds <= storyboard.MAX_SHOT_SECONDS
+    assert any("时长" in fix for fix in shots[0].fixes)
+    # 台词装得下的镜头不动
+    assert shots[1].duration_seconds == 3

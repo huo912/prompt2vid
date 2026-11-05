@@ -715,12 +715,14 @@ def _shot_line_timings(
     offset: float,
     shot_seconds: float,
     with_speaker: bool,
+    time_scale: float = 1.0,
 ) -> list[tuple[float, float, str]]:
     """把一镜的台词行换成绝对时间轴字幕条目。
 
     首选配音清单里的行起止时间（真实的逐行合成结果）；没有行信息时
     回退到该镜 narration 一条字幕（旧行为）。字幕被夹在本镜时间区间
-    内，防止时间轴逸出去与下一镜重叠。
+    内，防止时间轴逸出去与下一镜重叠。time_scale 用于补偿配音提速
+    （atempo）：行时间按 1/提速系数 缩短。
     """
     if shot is None:
         return []
@@ -736,13 +738,14 @@ def _shot_line_timings(
         for item in raw
         if isinstance(item, dict)
     }
+    scale = time_scale if time_scale > 0 else 1.0
     timings: list[tuple[float, float, str]] = []
     for index, line in enumerate(lines, start=1):
         item = by_index.get(index)
         if not item:
             continue
-        start = offset + max(0.0, float(item.get("start", 0.0) or 0.0))
-        end = offset + float(item.get("end", 0.0) or 0.0)
+        start = offset + max(0.0, float(item.get("start", 0.0) or 0.0)) * scale
+        end = offset + float(item.get("end", 0.0) or 0.0) * scale
         if end <= start:
             continue
         end = min(end, offset + shot_seconds)
@@ -827,6 +830,11 @@ def render_final(workspace: str | Path | None = None) -> dict:
     clip_infos: list[tuple[int, Path, float, float]] = []  # (id, 路径, 片段长, 有效长)
     lipsync_used = 0
     cursor = 0.0
+    # 配音比画面长时的两步处理：先按需提速旁白（变速不变调，上限
+    # PROMPT2VID_AUDIO_SPEEDUP_MAX，默认 1.2），剩余缺口再交给画面补长
+    # （PROMPT2VID_PAD_MODE=slow 降速 + 定格）——避免长段定格/倒放
+    speedup_max = max(1.0, env_float("PROMPT2VID_AUDIO_SPEEDUP_MAX", 1.2))
+    overrun_tolerance = max(0.0, env_float("PROMPT2VID_AUDIO_FIT_TOLERANCE", 1.0))
     for clip in ok_clips:
         shot_id = int(clip.get("id", 0))
         clip_path = lipsync_of.get(shot_id)
@@ -849,26 +857,41 @@ def render_final(workspace: str | Path | None = None) -> dict:
             except (RuntimeError, FileNotFoundError):
                 audio_duration = 0.0
 
-        # 配音比片段长 → 用定格末帧延长视频，保证旁白不被截断
+        # 配音比片段长 → 先提速旁白（上限内），再降速/定格补长画面，
+        # 保证旁白不被截断
         effective = max(duration, audio_duration)
-        extend = effective - duration
+        speedup = 1.0
+        if audio_duration > duration + overrun_tolerance and duration > 0.1:
+            speedup = min(speedup_max, audio_duration / (duration * 1.02))
+            if speedup <= 1.005:
+                speedup = 1.0
+            else:
+                effective = max(duration, audio_duration / speedup)
+        extend = max(0.0, effective - duration)
         if extend > 0.3:
             logger.info(
-                "render: 分镜 %d 配音 %.1fs 超过片段 %.1fs，定格延长 %.1fs",
-                shot_id, audio_duration, duration, extend,
+                "render: 分镜 %d 配音 %.1fs 超过片段 %.1fs（旁白提速 %.2fx%s），"
+                "画面补长 %.1fs",
+                shot_id, audio_duration, duration,
+                speedup,
+                "" if speedup <= 1.0 else f"，{audio_duration / speedup:.1f}s",
+                extend,
             )
             audio_overruns.append(
                 {
                     "id": shot_id,
                     "clip_seconds": round(duration, 2),
                     "audio_seconds": round(audio_duration, 2),
+                    "speedup": round(speedup, 3),
+                    "fitted_audio_seconds": round(audio_duration / speedup, 2),
                     "extended_seconds": round(extend, 2),
                 }
             )
         clip_infos.append((shot_id, clip_path, duration, effective))
 
         fitted = ffmpeg_ops.fit_audio(
-            audio_path, effective, work_dir / f"audio_{shot_id}.wav"
+            audio_path, effective, work_dir / f"audio_{shot_id}.wav",
+            speedup=speedup,
         )
         fitted_audio.append(fitted)
 
@@ -877,7 +900,8 @@ def render_final(workspace: str | Path | None = None) -> dict:
             "on", "1", "true", "yes",
         )
         line_timings = _shot_line_timings(
-            shot, audio_entries.get(shot_id), cursor, effective, with_speaker
+            shot, audio_entries.get(shot_id), cursor, effective, with_speaker,
+            time_scale=1.0 / speedup,
         )
         if line_timings:
             timings.extend(line_timings)
@@ -893,12 +917,15 @@ def render_final(workspace: str | Path | None = None) -> dict:
         if transition < 0.1:
             transition = 0.0
 
-    # 2. 规范化转码（非末段镜头额外定格 transition 秒，供 xfade 重叠消耗）
+    # 2. 规范化转码（非末段镜头额外定格 transition 秒，供 xfade 重叠消耗；
+    #    配音缺口用 PROMPT2VID_PAD_MODE=slow 降速补长，绝不让画面倒放）
+    pad_mode = (env_str("PROMPT2VID_PAD_MODE", "") or "").strip().lower() or "slow"
     for clip_index, (shot_id, clip_path, duration, effective) in enumerate(clip_infos):
-        extend = effective - duration
-        video_extend = extend + (transition if clip_index < len(clip_infos) - 1 else 0.0)
+        extend = max(0.0, effective - duration)
+        frozen = transition if clip_index < len(clip_infos) - 1 else 0.0
         normalized.append(ffmpeg_ops.normalize_clip(
-            clip_path, work_dir / f"clip_{shot_id}.mp4", extend_seconds=video_extend
+            clip_path, work_dir / f"clip_{shot_id}.mp4",
+            extend_seconds=extend, freeze_seconds=frozen, pad_mode=pad_mode,
         ))
 
     # 3. 拼接视频与音轨（视频带过渡时走 xfade 链，音轨恒为顺序拼接）
@@ -979,6 +1006,7 @@ def render_final(workspace: str | Path | None = None) -> dict:
             if upscale_to else None
         ),
         "has_audio": probe["has_audio"],
+        "pad_mode": pad_mode,
         "audio_overruns": audio_overruns,
         "lipsync": {"shots": lipsync_used, "total": len(ok_clips)},
         "shots": [
@@ -1014,10 +1042,13 @@ def run_quality_checks(workspace: str | Path | None = None) -> dict:
 
     expected = _expected_duration(ws)
     if expected:
+        # 容差跟需求里的「总时长上下浮动」对齐（默认 ±3s）。配音驱动的分镜
+        # 很难精确落在整数秒，卡得太死会让本来能用的成片判不合格
+        tolerance = env_float("PROMPT2VID_DURATION_TOLERANCE", 3.0)
         add(
             "duration_match",
-            abs(duration - expected) <= 2.0,
-            f"成片 {duration:.1f}s vs 需求 {expected:.1f}s（允许 ±2s）",
+            abs(duration - expected) <= tolerance,
+            f"成片 {duration:.1f}s vs 需求 {expected:.1f}s（允许 ±{tolerance:g}s）",
         )
     # 画幅现在跟随首帧宽高比（如 768x1344 → 480x832 / 576x1024），
     # 不能再用“宽 ≥ 512”判定，否则合法的竖屏 480x832 会被误判为不达标。

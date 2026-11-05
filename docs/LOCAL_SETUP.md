@@ -450,6 +450,51 @@ PROMPT2VID_TTS_KEEP_CACHED=true
 > 24GB+ 无压力。`PROMPT2VID_TTS_KEEP_CACHED=false` 可让模型每次推理后
 > 卸载，与其它阶段错峰用显存（代价是逐镜重载，变慢）。
 
+### 7.3 云 GPU（AutoDL 等 Linux）实战：软链数据盘 + 免交互安装
+
+云机的系统盘通常很小、数据盘很大，模型必须落在数据盘再软链进
+ComfyUI，否则装到一半就 `No space left on device`。以下在
+RTX 4090 D / ComfyUI 0.44 / Python 3.12 上实测通过。
+
+```bash
+# 1) 装节点：云机 git clone 常因 GnuTLS 报错，改用 tarball
+cd /root/autodl-tmp/ComfyUI/custom_nodes
+curl -L https://github.com/chenpipi0807/ComfyUI-Index-TTS/archive/refs/heads/main.tar.gz -o /tmp/idx.tgz
+tar -xzf /tmp/idx.tgz && mv ComfyUI-Index-TTS-main ComfyUI-Index-TTS
+# requirements.txt 里的 git+https 行在内网/云机上必然失败，装依赖前先删掉
+grep -v '^git+' ComfyUI-Index-TTS/requirements.txt > /tmp/req.txt
+pip install -r /tmp/req.txt
+
+# 2) 模型放数据盘，软链进 models/（节点按 <ComfyUI>/models/IndexTTS-2.5 找）
+ln -s /autodl-fs/data/IndexTTS-2.5 /root/autodl-tmp/ComfyUI/models/IndexTTS-2.5
+ls models/IndexTTS-2.5/{config.yaml,feat1.pt,feat2.pt,gpt.pth,codec.pth,s2mel.pth,\
+wav2vec2bert_stats.pt,multilingual_zh_ja_yue_char_del.tiktoken}  # 8 个都要在
+
+# 3) 下载脚本用 input() 选镜像，非交互环境要喂输入（2 = hf-mirror）
+echo 2 | python ComfyUI-Index-TTS/TTS2_5_download.py
+
+# 4) 重启 ComfyUI（云机一般没装 ComfyUI-Manager，手动重启）
+pkill -f "main.py --listen"
+cd /root/autodl-tmp/ComfyUI && nohup python -u main.py --listen 127.0.0.1 --port 8188 \
+  > comfyui.log 2>&1 &
+sleep 20 && grep -a "IndexTTS" comfyui.log   # 有 IndexTTS25BaseNode 注册即成功
+```
+
+> **软链要点**：`models/IndexTTS-2.5` 可以是指向数据盘的符号链接，节点的
+> 模型校验会跟随链接检查 `bigvgan/`、`w2v-bert-2.0/`、`qwen0.6bemo4-merge/`、
+> `campplus/`、`campplus_cn_common.bin` 等子路径——这些都在模型目录里一起
+> 软链过去，不用逐个建链。`hf_cache/` 约翻倍占盘，校验通过后可删。
+>
+> **首轮很慢是正常的**：首次推理要把 gpt/w2v-bert/codec/s2mel/bigvgan
+> 全部载入显存并构建中文分词 FEN，4090 上约 **5 分钟**（只一次）；之后
+> 同进程 `keep_models_cached=true` 单句合成 **3-11 秒**。客户端按
+> `COMFYUI_TIMEOUT`（默认 1800s）持续轮询，中途 `GET /history` 读到超时
+> 只是网络抖动，任务仍会跑完并把结果取回——不会误判失败去降级。
+>
+> **验证**：`prompt2vid --check-only` 出现 `OK 配音（IndexTTS-2.5）:
+> ComfyUI 本地推理，音色: 甜美女声.mp3`，重跑配音步骤后 `audio/shot_*.mp3`
+> 每段几十到上百 KB（静音占位只有 1KB 左右），质检 `voiceover_audible` 通过。
+
 ---
 
 ## 8. 口型同步（可选：LatentSync 唇形驱动）

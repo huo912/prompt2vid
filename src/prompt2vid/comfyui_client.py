@@ -620,12 +620,25 @@ class ComfyUIClient:
             raise ComfyUITaskError(f"ComfyUI 执行失败: {status}")
         return None
 
+    def _history_entry_or_none(self, prompt_id: str) -> dict[str, Any] | None:
+        """轮询专用：网络抖动/读超时视为「还没好」，由 deadline 决定何时放弃。
+
+        首次加载 IndexTTS-2.5 这类大模型时服务端会长时间占住工作线程，
+        /history 可能读到 30s 超时，但任务本身还在正常跑——把超时当失败
+        会让整句配音白白降级到下一级引擎。
+        """
+        try:
+            return self._history_entry(prompt_id)
+        except httpx.TransportError as exc:  # ReadTimeout/ConnectError/...
+            logger.debug("ComfyUI 轮询 %s 暂时不可达（%s），继续等待", prompt_id, exc)
+            return None
+
     def wait(self, prompt_id: str, timeout: float | None = None) -> dict[str, Any]:
         """轮询 /history 直到任务完成，返回 history 条目（指数退避）。"""
         deadline = time.monotonic() + (timeout or env_float("COMFYUI_TIMEOUT", DEFAULT_TIMEOUT))
         interval = POLL_START
         while True:
-            entry = self._history_entry(prompt_id)
+            entry = self._history_entry_or_none(prompt_id)
             if entry is not None:
                 return entry
             if time.monotonic() > deadline:
@@ -649,7 +662,7 @@ class ComfyUIClient:
         while pending:
             for pid in sorted(pending):
                 try:
-                    entry = self._history_entry(pid)
+                    entry = self._history_entry_or_none(pid)
                 except ComfyUITaskError as exc:
                     done[pid] = exc
                     pending.discard(pid)

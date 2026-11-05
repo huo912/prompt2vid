@@ -598,8 +598,8 @@ cd /root/autodl-tmp/ComfyUI
 nohup python main.py --listen 127.0.0.1 --port 8188 > comfyui.log 2>&1 &
 tail -f comfyui.log
 
-ssh -N -L 8188:127.0.0.1:8188 -p 23246 root@connect.westb.seetacloud.com
-zSW27+LKbW9h
+ssh -N -L 8188:127.0.0.1:8188 -p 28837 root@connect.westb.seetacloud.com
+# 密码 / 端口见 AutoDL 控制台「自定义服务」，勿写进仓库（或改用免密登录）
 
 source .venv/bin/activate
 

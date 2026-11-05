@@ -33,6 +33,14 @@ MAX_SHOT_SECONDS = 10.0
 DEFAULT_SHOT_SECONDS = 4.0
 DEFAULT_MOTION_PROMPT = "subtle motion, gentle camera drift"
 
+# 台词时长估算（把「说了多久」变成「画面要拍多久」）：
+# 中文 TTS 实测语速——IndexTTS-2.5 约 2.8-3.2 字/秒，edge-tts 约 4.5 字/秒，
+# 取最慢的一档并留出句间停顿，宁可多给画面余量（多出来的部分由后期
+# 降速/定格吸收，比反过来截断旁白安全）。
+SPEECH_CHARS_PER_SECOND = 2.6
+SPEECH_LINE_GAP_SECONDS = 0.25
+SPEECH_TAIL_SECONDS = 0.4
+
 # 旁白行的发言人 id（角色 id 从 1 开始，0 专门表示旁白/画外音）
 NARRATOR_ID = 0
 # 发言人写这些字样时按旁白处理
@@ -114,6 +122,23 @@ class Shot:
         if self.narration:
             return [Line(speaker=NARRATOR_ID, text=self.narration)]
         return []
+
+
+def estimate_speech_seconds(lines: list[Line] | None, narration: str = "") -> float:
+    """估算这些台词念出来需要多少秒（用于给画面排时长）。
+
+    中文按 SPEECH_CHARS_PER_SECOND 保守折算，行间留 SPEECH_LINE_GAP_SECONDS
+    停顿，末尾留 SPEECH_TAIL_SECONDS——分镜时长必须覆盖这段语音，否则成片
+    阶段只能靠降速/定格把画面拉长，口型必然对不上。
+    """
+    texts = [line.text.strip() for line in (lines or []) if line.text.strip()]
+    if not texts and narration.strip():
+        texts = [narration.strip()]
+    if not texts:
+        return 0.0
+    seconds = sum(len(text) / SPEECH_CHARS_PER_SECOND for text in texts)
+    seconds += SPEECH_LINE_GAP_SECONDS * (len(texts) - 1)
+    return seconds + SPEECH_TAIL_SECONDS
 
 
 def extract_json_value(text: str) -> object:
@@ -311,6 +336,18 @@ def _normalize_shot(
 
     # 台词行：speaker 支持 id / 角色名 / 旁白；解析不了的降级为旁白
     dialogue = _normalize_dialogue(item.get("dialogue"), characters, fixes)
+
+    # 时长下限要覆盖台词：分镜时长给短了，成片阶段只能靠降速/定格把画面
+    # 撑到配音长度（嘴型对不上、画面发卡）。这里按估算语速抬到够用的长度，
+    # 仍受 MAX_SHOT_SECONDS 上限约束。
+    needed = estimate_speech_seconds(dialogue, narration)
+    if needed > duration:
+        bumped = min(max(needed, MIN_SHOT_SECONDS), MAX_SHOT_SECONDS)
+        if bumped > duration + 0.05:
+            fixes.append(
+                f"时长 {duration:g} 提升到 {bumped:.1f}（覆盖台词约 {needed:.1f}s）"
+            )
+            duration = bumped
 
     # 角色一致性契约：出场角色的外观描述必须逐字出现在 image_prompt。
     # LLM 漏写时代码兜底补入（不修改 storyboard.json 文件，仅内存修复）。

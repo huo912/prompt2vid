@@ -153,6 +153,38 @@ def test_comfyui_unavailable_falls_back_to_edge(monkeypatch, tmp_path, caplog):
     assert any("IndexTTS-2.5 不可用" in r.getMessage() for r in caplog.records)
 
 
+def test_piper_forces_utf8_stdin(monkeypatch, tmp_path):
+    """piper 子进程必须按 UTF-8 读 stdin：Windows 默认 cp936 会把中文变乱码，
+    espeak 产出空音素 → piper 一个采样都不写就 exit 1（静音占位）。"""
+    captured: dict = {}
+
+    def fake_run(cmd, **kwargs):
+        captured.update(kwargs)
+        captured["cmd"] = cmd
+        Path(cmd[cmd.index("--output_file") + 1]).write_bytes(b"fake-wav")
+
+        class Result:
+            returncode = 0
+            stderr = ""
+
+        return Result()
+
+    monkeypatch.setattr(tts.shutil, "which", lambda name: "/fake/piper")
+    monkeypatch.setattr(tts, "_piper_model", lambda: "/fake/voice.onnx")
+    monkeypatch.setattr(tts.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        tts, "_finalize_audio",
+        lambda wav, dest, bitrate="192k": bool(dest.write_bytes(b"mp3")),
+    )
+
+    dest = tmp_path / "shot_1.mp3"
+    assert tts._tts_via_piper("秋天的公园", dest)
+
+    assert captured["input"] == "秋天的公园"
+    assert captured["env"]["PYTHONUTF8"] == "1"
+    assert captured["env"]["PYTHONIOENCODING"].lower().startswith("utf-8")
+
+
 def test_all_engines_fail_writes_silent_placeholder(monkeypatch, tmp_path, caplog):
     monkeypatch.setattr(tts, "_comfyui_tts_available", lambda: False)
     monkeypatch.setattr(tts, "_tts_via_edge", lambda *a, **kw: False)

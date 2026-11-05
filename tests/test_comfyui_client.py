@@ -214,6 +214,43 @@ def test_wait_status_none_does_not_crash():
     assert client.wait("pid-1", timeout=5)["status"]["completed"] is True
 
 
+def test_wait_survives_transient_read_timeout():
+    """首轮加载大模型时 /history 读到超时，任务仍在跑，不能当失败放弃。"""
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] <= 3:
+            raise httpx.ReadTimeout("timed out", request=request)
+        pid = request.url.path.rsplit("/", 1)[1]
+        return httpx.Response(200, json={pid: _completed_entry()})
+
+    client = ComfyUIClient(
+        base_url="http://comfyui.test",
+        http=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    assert client.wait("pid-1", timeout=5)["status"]["completed"] is True
+
+
+def test_wait_all_survives_transient_read_timeout():
+    """批量等待同样忽略瞬时网络错误，直到 deadline。"""
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] <= 2:
+            raise httpx.ConnectError("connection refused", request=request)
+        pid = request.url.path.rsplit("/", 1)[1]
+        return httpx.Response(200, json={pid: _completed_entry()})
+
+    client = ComfyUIClient(
+        base_url="http://comfyui.test",
+        http=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    results = client.wait_all(["pid-a"], timeout=5)
+    assert results["pid-a"]["status"]["completed"] is True
+
+
 def test_submit_rejection_includes_body():
     """工作流被拒（如节点未安装）时，错误信息带响应体便于定位。"""
 
