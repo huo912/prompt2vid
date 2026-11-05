@@ -15,13 +15,18 @@ compatibility: ComfyUI LTX-Video（2B 0.9.5 / 13B 0.9.7）
 ## 硬性规则
 
 1. 只写英文，1~2 个短句，不超过 25 个词。
-2. 时长 3~5 秒。帧数按 `8n+1` 换算（代码自动算，你只需保证时长合理）：
+2. 时长 3~8 秒。帧数按 `8n+1` 换算（代码自动算，你只需保证时长合理）：
 
    | 时长 | 25fps 帧数 |
    | --- | --- |
    | 3s | 81 |
    | 4s | 101 |
    | 5s | 121 |
+   | 6s | 151 |
+   | 8s | 201 |
+
+   单镜硬顶由 `COMFYUI_LTX_MAX_FRAMES` 决定（默认 257 帧 ≈ 10.2s），
+   超过这个时长的台词只能靠降速吸收——写分镜时别指望它。
 
 3. 运动幅度小、速度慢：`slow zoom in`、`gentle pan left`、`subtle drift`、
    `soft handheld sway`、`slow dolly forward`。

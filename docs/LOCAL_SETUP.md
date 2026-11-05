@@ -38,9 +38,12 @@ LTXV 节点是否齐备，并对每个 NG 项给出修复提示。本文就是�
 > fp16 版约 9GB+，加载即 OOM。fp8 版放在 CPU 上跑（本项目工作流默认
 > `COMFYUI_T5_DEVICE=cpu`），编码速度足够（每镜只编码一次）。
 >
-> **关键约束 2**：LTX 帧数必须是 **8n+1**（9/17/…/121），且 8GB 显存下建议
-> 单镜 ≤121 帧（约 4.8s @25fps）。本项目代码已自动按时长换算并强制这两个约束，
-> 无需手工干预（`COMFYUI_LTX_MAX_FRAMES` 可调）。
+> **关键约束 2**：LTX 帧数必须是 **8n+1**（9/17/…/257）。单镜上限由
+> `COMFYUI_LTX_MAX_FRAMES` 决定：代码默认 **257 帧（约 10.2s @25fps）**，是
+> 24GB（4090/5090）档实测用满的值——13B dev fp8 / 576×1024 下峰值显存 18.4GB，
+> 与 121 帧几乎相同（采样分块，帧数不吃显存），只多花时间（约 160s vs 75s）。
+> **8GB 档务必压回 121 帧（约 4.8s）**，2B 模型在 8GB 上撑不住 257 帧。
+> 本项目代码会自动按时长换算并强制 8n+1，无需手工干预。
 >
 > **可选增强的显存门槛**：配音升级 IndexTTS-2.5 约 12GB（§7），口型同步
 > LatentSync 约 20GB（§8）——8GB 档两者都建议关闭（配音走回退链、
@@ -255,7 +258,7 @@ Get-ChildItem "D:\ComfyUI_windows_portable\ComfyUI\models\checkpoints", `
 | `COMFYUI_T2I_LORA` / `COMFYUI_T2I_LORA_STRENGTH` | `anime.safetensors` / `1.5` | 文生图动漫 LoRA（§3.3 第 4 步下载，48MB）；滑块类 LoRA 权重建议 1.0-2.0；文件缺失自动降级为不挂 |
 | `COMFYUI_LTX_LORA` | （空） | 视频侧 LoRA：LTX 2B 无现成动漫 LoRA，留空即可（视频风格由动漫首帧传递）；13B 档推荐见 docs/deploy.md §7 |
 | `COMFYUI_RETRIES` | `2` | 单镜生成失败自动重试次数 |
-| `COMFYUI_LTX_FPS` / `COMFYUI_LTX_MAX_FRAMES` | `25` / `121` | 帧率与单镜帧数上限（8n+1 自动保证） |
+| `COMFYUI_LTX_FPS` / `COMFYUI_LTX_MAX_FRAMES` | `25` / `257` | 帧率与单镜帧数上限（8n+1 自动保证；8GB 档设 `121`） |
 | `PROMPT2VID_MODEL` | 如 `openai/qwen3.8-27b` | **注意加 LiteLLM 提供商前缀**（自建 OpenAI 兼容网关用 `openai/` 前缀），否则 LiteLLM 可能无法路由 |
 | `PROMPT2VID_LLM_BASE_URL` / `_API_KEY` | 网关地址 / 密钥 | 你已配置好内网网关，无需改动 |
 | `DOUYIN_DRY_RUN` | `true` | 无抖音凭据时保持 true，只记录不真实上传 |

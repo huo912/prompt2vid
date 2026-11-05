@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from prompt2vid import stages
+from prompt2vid import comfyui_client, stages
 from prompt2vid.comfyui_client import ComfyUITaskError, fit_ltx_size, parse_output_files
 from prompt2vid.ffmpeg_ops import resolve_tool
 
@@ -189,14 +189,25 @@ def _use_fake_client(monkeypatch, **kwargs) -> FakeComfyUIClient:
     return fake
 
 
-def test_frames_for_duration_respects_ltx_constraints():
+def test_frames_for_duration_respects_ltx_constraints(monkeypatch):
+    monkeypatch.delenv("COMFYUI_LTX_MAX_FRAMES", raising=False)
     # 8n+1 约束
     for seconds in (1, 2, 3, 4, 5, 8, 10):
         length = stages.frames_for_duration(seconds)
         assert (length - 1) % 8 == 0, f"{seconds}s -> {length}"
         assert length >= stages.MIN_FRAMES
     # 上限
-    assert stages.frames_for_duration(60) <= 121
+    assert stages.frames_for_duration(60) == comfyui_client.DEFAULT_LTX_MAX_FRAMES
+
+
+def test_frames_for_duration_clamps_to_env_cap(monkeypatch):
+    """8GB 档把上限压回 121 帧时，超长镜头按 121 截断。"""
+    monkeypatch.setenv("COMFYUI_LTX_MAX_FRAMES", "121")
+    assert stages.frames_for_duration(60) == 121
+    assert stages.frames_for_duration(8) == 121
+    monkeypatch.setenv("COMFYUI_LTX_MAX_FRAMES", "257")
+    assert stages.frames_for_duration(8) == 201
+    assert stages.frames_for_duration(60) == 257
 
 
 def test_frames_for_duration_follows_ltx_fps_env(monkeypatch):

@@ -39,7 +39,7 @@ compatibility: 与 src/prompt2vid/storyboard.py 的宽容解析配套
 | `visual` | string | ✅ | 画面描述（中文，给人看的） |
 | `image_prompt` | string | ✅ | 英文 SDXL 首帧提示词 |
 | `motion_prompt` | string | ✅ | 英文 LTX 运动描述 |
-| `duration_seconds` | number | ✅ | 3~5 秒（中间层仍受 LTX 单镜上限约 4.8 秒约束） |
+| `duration_seconds` | number | ✅ | 3~8 秒（硬顶是 LTX 单镜上限约 10.2 秒，长台词优先拆镜而不是拉长单镜） |
 
 ## `dialogue`：让人物真的开口
 
@@ -77,6 +77,8 @@ compatibility: 与 src/prompt2vid/storyboard.py 的宽容解析配套
 | 3 秒 | 6 字 |
 | 4 秒 | 9 字 |
 | 5 秒 | 11 字 |
+| 6 秒 | 14 字 |
+| 8 秒 | 19 字 |
 
 算法：`字数 ≤ 2.6 × (duration_seconds − 0.4)`（写两句再减 0.25 秒的句间停顿）。
 超过这个长度，配音比画面长，下游只能给旁白提速或降速画面来凑，
@@ -85,8 +87,11 @@ compatibility: 与 src/prompt2vid/storyboard.py 的宽容解析配套
 整片同理：所有镜头台词字数之和 ≤ `2.6 × (需求时长 − 0.4 × 镜头数)`。
 需求 20 秒、5 镜 → 台词总共不超过约 46 字。要表达的内容更多就
 **多加镜头或提炼句子**，而不是把台词塞长。分镜表写出超预算台词时，
-`storyboard.py` 会告警并把该镜时长抬到够用长度（但 LTX 单镜只生成约
-4.8 秒，超出的部分仍然只能靠后期补）。
+`storyboard.py` 会告警并把该镜时长抬到够用长度（但单镜还有 LTX 帧数
+上限约 10.2 秒，超出的部分仍然只能靠后期补）。
+
+同一个需求时长下，**镜头数越多、每镜台词越少**才不会撑爆成片：需求 25 秒
+写 6 镜平均 4.2 秒，就按上表每镜 9~11 字写，全片台词合计别超过 60 字。
 
 ## `characters[].voice` / `characters[].timbre`：不同角色不同嗓子
 

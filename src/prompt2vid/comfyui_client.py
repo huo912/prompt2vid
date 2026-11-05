@@ -134,7 +134,11 @@ def ltx_fps() -> float:
 
 # LTX 单镜帧数上限（8n+1，受显存预算约束）。超出该上限的分镜实际只生成
 # 这么长，配音多出来的部分只能靠降速/补帧吸收。
-DEFAULT_LTX_MAX_FRAMES = 121
+# 257 帧 = 10.2s，实测（RTX 4090 24GB / 13B dev fp8 / 576x1024）：121 帧
+# 峰值显存 18.6GB，257 帧 18.4GB——帧数不是显存瓶颈（ComfyUI 会分块算
+# 注意力），耗时约 2.1 倍（75s → 160s）。8GB 档（LTX 2B）放不下，用
+# COMFYUI_LTX_MAX_FRAMES=121 压回去。
+DEFAULT_LTX_MAX_FRAMES = 257
 MIN_LTX_FRAMES = 9  # 8*1+1
 
 
@@ -145,7 +149,7 @@ def ltx_max_frames() -> int:
 
 
 def ltx_clip_seconds() -> float:
-    """LTX 单镜能生成的最长秒数（帧数上限 ÷ 帧率，默认约 4.8s）。"""
+    """LTX 单镜能生成的最长秒数（帧数上限 ÷ 帧率，默认约 10.2s）。"""
     return (ltx_max_frames() - 1) / ltx_fps()
 
 # 种子计数器：PROMPT2VID_SEED 固定后，逐次 +1 保证分镜间种子不同但整跑可复现

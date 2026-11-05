@@ -54,7 +54,10 @@ def test_load_storyboard_happy_path(tmp_path: Path):
     assert shots[0].fixes == []
 
 
-def test_load_storyboard_repairs_and_fills_defaults(tmp_path: Path):
+def test_load_storyboard_repairs_and_fills_defaults(tmp_path: Path, monkeypatch):
+    # 其它测试可能经 load_env 把仓库 .env 写进 os.environ（8GB 档上限 121 帧），
+    # 这里清掉保证断言的是默认档的内容上限
+    monkeypatch.delenv("COMFYUI_LTX_MAX_FRAMES", raising=False)
     data = {
         "shots": [
             # duration 是字符串、缺 motion_prompt / image_prompt
@@ -67,7 +70,7 @@ def test_load_storyboard_repairs_and_fills_defaults(tmp_path: Path):
     shots = storyboard.load_storyboard(path)
     assert len(shots) == 2
     assert shots[0].id == 3
-    assert shots[0].duration_seconds == 10.0  # 上限 10s
+    assert shots[0].duration_seconds == storyboard.max_shot_seconds()  # 上限 10s
     assert shots[0].motion_prompt == storyboard.DEFAULT_MOTION_PROMPT
     assert shots[0].image_prompt  # 回落到 visual
     assert shots[0].fixes  # 记录了修复项
@@ -136,8 +139,9 @@ def test_load_storyboard_errors(tmp_path: Path):
         storyboard.load_storyboard(path)
 
 
-def test_shot_longer_than_ltx_clip_limit_is_flagged(tmp_path: Path):
+def test_shot_longer_than_ltx_clip_limit_is_flagged(tmp_path: Path, monkeypatch):
     """台词超出 LTX 单镜上限时提前告警（否则成片只能靠降速/补帧硬撑）。"""
+    monkeypatch.setenv("COMFYUI_LTX_MAX_FRAMES", "121")
     data = {
         "shots": [
             {"id": 1, "narration": "这是一段很长的旁白大概要念十秒钟左右才能念完",
@@ -509,3 +513,32 @@ def test_shot_duration_raised_to_cover_dialogue(tmp_path: Path):
     assert any("时长" in fix for fix in shots[0].fixes)
     # 台词装得下的镜头不动
     assert shots[1].duration_seconds == 3
+
+
+def test_max_shot_seconds_follows_ltx_frame_cap(monkeypatch):
+    """单镜硬顶取「内容上限」和「LTX 帧数上限」的较小值。"""
+    monkeypatch.delenv("COMFYUI_LTX_MAX_FRAMES", raising=False)
+    assert storyboard.max_shot_seconds() == pytest.approx(storyboard.MAX_SHOT_SECONDS)
+    monkeypatch.setenv("COMFYUI_LTX_MAX_FRAMES", "121")
+    assert storyboard.max_shot_seconds() == pytest.approx(120 / 25)
+
+
+def test_shot_duration_clamped_to_ltx_frame_cap(tmp_path: Path, monkeypatch):
+    """8GB 档单镜只有 4.8s：分镜声明的 8s 被压到 4.8s 并给出告警。"""
+    monkeypatch.setenv("COMFYUI_LTX_MAX_FRAMES", "121")
+    data = {
+        "shots": [
+            {
+                "id": 1,
+                "narration": "",
+                "visual": "空镜",
+                "image_prompt": "empty hall",
+                "motion_prompt": "static",
+                "duration_seconds": 8,
+            }
+        ]
+    }
+    path = _write(tmp_path / "storyboard.json", json.dumps(data, ensure_ascii=False))
+    shots = storyboard.load_storyboard(path)
+    assert shots[0].duration_seconds == pytest.approx(4.8)
+    assert any("4.8" in fix for fix in shots[0].fixes)

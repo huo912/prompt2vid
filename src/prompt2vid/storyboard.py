@@ -32,7 +32,9 @@ logger = logging.getLogger("prompt2vid.storyboard")
 
 STORYBOARD_FILE = "storyboard.json"
 
-# 每镜时长与帧数预算（LTX + 8GB 显存）
+# 每镜时长与帧数预算（LTX + 显存）：内容上限之外还要服从 LTX 单镜帧数
+# 上限——声明 7s 而显卡只能生成 4.8s 时，多出的配音只能靠降速/补帧吸收，
+# 口型必然对不上，所以要取两者较小值（见 max_shot_seconds）
 MIN_SHOT_SECONDS = 1.0
 MAX_SHOT_SECONDS = 10.0
 DEFAULT_SHOT_SECONDS = 4.0
@@ -151,6 +153,16 @@ def speech_budget_chars(seconds: float, line_count: int = 1) -> int:
     usable = seconds - SPEECH_TAIL_SECONDS
     usable -= SPEECH_LINE_GAP_SECONDS * max(0, line_count - 1)
     return max(0, int(usable * SPEECH_CHARS_PER_SECOND))
+
+
+def max_shot_seconds() -> float:
+    """单镜可声明的最长时长：内容上限与 LTX 实际能生成的秒数取小。
+
+    `COMFYUI_LTX_MAX_FRAMES` 决定了每镜真正能生成多久（默认 257 帧 ≈ 10.2s，
+    8GB 档压到 121 帧 ≈ 4.8s）。分镜若声明超过它，多出的配音只能靠降速/
+    定格吸收，口型对不上——所以先把时长夹到可生成范围内。
+    """
+    return min(MAX_SHOT_SECONDS, ltx_clip_seconds())
 
 
 def extract_json_value(text: str) -> object:
@@ -333,7 +345,8 @@ def _normalize_shot(
     motion_prompt = str(item.get("motion_prompt") or "").strip()
 
     duration = _to_float(item.get("duration_seconds"), DEFAULT_SHOT_SECONDS)
-    clamped = min(max(duration, MIN_SHOT_SECONDS), MAX_SHOT_SECONDS)
+    ceiling = max_shot_seconds()
+    clamped = min(max(duration, MIN_SHOT_SECONDS), ceiling)
     if not math.isclose(duration, clamped):
         fixes.append(f"时长 {duration} 调整为 {clamped}")
         duration = clamped
@@ -351,10 +364,10 @@ def _normalize_shot(
 
     # 时长下限要覆盖台词：分镜时长给短了，成片阶段只能靠降速/定格把画面
     # 撑到配音长度（嘴型对不上、画面发卡）。这里按估算语速抬到够用的长度，
-    # 仍受 MAX_SHOT_SECONDS 上限约束。
+    # 仍受 max_shot_seconds()（内容上限 & LTX 帧数上限）约束。
     needed = estimate_speech_seconds(dialogue, narration)
     if needed > duration:
-        bumped = min(max(needed, MIN_SHOT_SECONDS), MAX_SHOT_SECONDS)
+        bumped = min(max(needed, MIN_SHOT_SECONDS), ceiling)
         if bumped > duration + 0.05:
             fixes.append(
                 f"时长 {duration:g} 提升到 {bumped:.1f}（覆盖台词约 {needed:.1f}s）"
@@ -373,14 +386,17 @@ def _normalize_shot(
             logger.warning("%s", msg)
             duration = bumped
 
-    # 分镜时长够了也不代表画面拍得出：LTX 单镜帧数上限（显存预算）决定
-    # 实际最长秒数。台词超出的部分只能靠降速/补帧吸收，口型必然对不上，
-    # 这里提前告警（不截断台词，交给人决定是删词还是抬上限）。
-    clip_limit = ltx_clip_seconds()
-    if needed > clip_limit + 0.05:
+    # 分镜时长够了也不代表画面拍得出：LTX 单镜帧数上限（显存预算）或单镜
+    # 内容上限决定的秒数才是硬顶。台词超出的部分只能靠降速/补帧吸收，口型
+    # 必然对不上，这里提前告警（不截断台词，交给人决定删词还是拆镜）。
+    if needed > ceiling + 0.05:
+        if ceiling < MAX_SHOT_SECONDS - 1e-6:
+            reason = f"LTX 单镜上限 {ceiling:.1f}s（COMFYUI_LTX_MAX_FRAMES）"
+        else:
+            reason = f"单镜上限 {ceiling:.1f}s（MAX_SHOT_SECONDS）"
         msg = (
-            f"分镜 {shot_id} 台词约 {needed:.1f}s 超出 LTX 单镜上限 {clip_limit:.1f}s"
-            f"（COMFYUI_LTX_MAX_FRAMES），成片需降速/补帧覆盖配音"
+            f"分镜 {shot_id} 台词约 {needed:.1f}s 超出{reason}，"
+            f"成片需降速/补帧覆盖配音（口型会错位），建议精简台词或拆镜"
         )
         fixes.append(msg)
         logger.warning("%s", msg)

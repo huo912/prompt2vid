@@ -64,7 +64,7 @@
   时把模型放 AutoDL 网盘（`/autodl-fs/data`）再软链到
   `models/checkpoints`——每批加载多 1-2 分钟，推理速度不受影响；
 - `COMFYUI_LTX_MAX_PIXELS=921600`（720p）在 24GB 上偏激进：13B 权重
-  15.7GB + 720p×121 帧的激活值容易顶满，**个别镜头 OOM 再考虑**，
+  15.7GB + 720p 的激活值容易顶满，**个别镜头 OOM 再考虑**，
   预检会提示这个风险；
   想要 720 宽输出又不冒 OOM 风险：保持 589824 + 开
   `PROMPT2VID_UPSCALE=720`（×1.25 放大痕迹很小）；
@@ -228,19 +228,21 @@ curl -L -o models/tts/zh_CN-huayan-medium.onnx.json \
 > `skipped`（`lipsync/manifest.json` 记录原因，渲染不受影响）。想要口型
 > 生效：用 `realistic` 风格，且分镜画面包含清晰的人物面部（近景/中景）。
 
-> **时长预算**：LTX 单镜有帧数上限（`COMFYUI_LTX_MAX_FRAMES`，默认 121 帧
-> ≈ 4.8s），台词若比这更长，画面只能靠降速/定格补长——口型再好也会拖。
-> 分镜阶段已按 `estimate_speech_seconds` 给出告警（`fixes` 里出现
-> 「超出 LTX 单镜上限」）。要么删台词/减镜数，要么抬上限（4090/5090 可试
-> 193/257 帧，需实测显存）。
+> **时长预算**：LTX 单镜有帧数上限（`COMFYUI_LTX_MAX_FRAMES`，默认 257 帧
+> ≈ 10.2s；8GB 档压到 121 帧 ≈ 4.8s），台词若比这更长，画面只能靠降速/
+> 定格补长——口型再好也会拖。分镜阶段已按 `estimate_speech_seconds` 给出
+> 告警（`fixes` 里出现「超出 LTX 单镜上限」），并把 `duration_seconds` 夹到
+> 可生成范围内。257 帧是实测值：RTX 4090 24GB / 13B dev fp8 / 576x1024 下
+> 峰值显存 18.4GB（与 121 帧的 18.6GB 基本持平，帧数不是显存瓶颈），单镜
+> 耗时约 75s → 160s。
 >
 > **台词字数预算**：中文旁白约 2.6 字/秒，一镜能念完的字数上限是
 > `2.6 × (duration_seconds − 0.4)`——3 秒约 6 字、4 秒约 9 字、5 秒约 11 字；
 > 全片台词总量 ≤ `2.6 × (需求时长 − 0.4 × 镜头数)`。超预算时分镜阶段会把
-> 该镜时长抬到够用长度（告警写进 `fixes`），但**抬时长不等于拍得出**：
-> 抬到 9s 的镜头仍只生成 4.8s。想让 `duration_match` 稳定通过，正确做法是
-> 在分镜表里把台词压进预算（`config/skills/storyboard-schema-guide/SKILL.md`
-> 已写明这条契约并列入自检清单），而不是加长镜头。
+> 该镜时长抬到够用长度（告警写进 `fixes`），但抬时长仍受 LTX 帧数上限约束：
+> 上限 4.8s 的档位抬到 9s 也只生成 4.8s。想让 `duration_match` 稳定通过，
+> 正确做法是在分镜表里把台词压进预算（`config/skills/storyboard-schema-guide/SKILL.md`
+> 已写明这条契约并列入自检清单），而不是无限加长镜头。
 
 ## 镜头过渡（PROMPT2VID_TRANSITION）
 

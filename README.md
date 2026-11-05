@@ -338,7 +338,7 @@ export PROMPT2VID_PROFILE=4090                    # 或只给档位简名
 | `COMFYUI_RETRIES` | 单镜生成失败重试次数（默认 2，按批次重试） |
 | `COMFYUI_IPADAPTER` | true 时启用角色一致性参考注入（分镜表含 `characters` 时先生成角色定妆照，出镜分镜首帧注入参考；需 ComfyUI 装 ComfyUI_IPAdapter_plus + 两个模型，见 [docs/LOCAL_SETUP.md](docs/LOCAL_SETUP.md) 第 6 节；未就位时自动回退无参考生成） |
 | `COMFYUI_IPADAPTER_PRESET` / `COMFYUI_IPADAPTER_WEIGHT` | IPAdapter 预设与注入权重（默认 `PLUS FACE (portraits)` / 0.8） |
-| `COMFYUI_LTX_FPS` / `COMFYUI_LTX_MAX_FRAMES` | LTX 帧率（25）与单镜帧数上限（121，帧数自动满足 8n+1） |
+| `COMFYUI_LTX_FPS` / `COMFYUI_LTX_MAX_FRAMES` | LTX 帧率（25）与单镜帧数上限（默认 257 ≈ 10.2s；8GB 档改 121 ≈ 4.8s；帧数自动满足 8n+1） |
 | `PROMPT2VID_SEED` | 固定种子复现（逐镜 +1；不设则随机） |
 | `PROMPT2VID_DIRECT_MEDIA` | true 时直接媒体模式（LLM 只做创意+发布） |
 | `PROMPT2VID_BGM` / `PROMPT2VID_BGM_VOLUME` | 可选背景音乐文件与音量（默认 0.25） |

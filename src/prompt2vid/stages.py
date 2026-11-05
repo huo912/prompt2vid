@@ -75,8 +75,8 @@ _LIPSYNC_NODES = (
 _LIPSYNC_TAIL = 0.15
 
 # LTX 帧数约束：length = 8n+1；帧率（COMFYUI_LTX_FPS，默认 25）与
-# 上限可配，帧率读取统一走 comfyui_client.ltx_fps（工作流同源）
-DEFAULT_LTX_MAX_FRAMES = 121
+# 上限可配，帧率/上限读取统一走 comfyui_client.ltx_fps / ltx_max_frames
+# （工作流同源，避免两处默认值漂移）
 MIN_FRAMES = 9  # 8*1+1
 
 # LTX 对人物肢体的稳定性提示：模型本身没有 anatomy 先验，正向提示词里
