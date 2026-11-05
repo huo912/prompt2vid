@@ -611,7 +611,9 @@ def _audio_fit_plan(clip_seconds: float, audio_seconds: float) -> tuple[float, f
     """
     longest = max(clip_seconds, audio_seconds)
     speedup_max = max(1.0, env_float("PROMPT2VID_AUDIO_SPEEDUP_MAX", 1.2))
-    tolerance = max(0.0, env_float("PROMPT2VID_AUDIO_FIT_TOLERANCE", 1.0))
+    # 小超差优先给旁白提速：提速 1.1 完全听不出来，而降速画面会把成片撑长
+    # 并带来定格卡顿
+    tolerance = max(0.0, env_float("PROMPT2VID_AUDIO_FIT_TOLERANCE", 0.3))
     if clip_seconds <= 0.1 or audio_seconds <= clip_seconds + tolerance:
         return 1.0, longest
     speedup = min(speedup_max, audio_seconds / (clip_seconds * 1.02))
@@ -944,8 +946,6 @@ def render_final(workspace: str | Path | None = None) -> dict:
     # 配音比画面长时的两步处理：先按需提速旁白（变速不变调，上限
     # PROMPT2VID_AUDIO_SPEEDUP_MAX，默认 1.2），剩余缺口再交给画面补长
     # （PROMPT2VID_PAD_MODE=slow 降速 + 定格）——避免长段定格/倒放
-    speedup_max = max(1.0, env_float("PROMPT2VID_AUDIO_SPEEDUP_MAX", 1.2))
-    overrun_tolerance = max(0.0, env_float("PROMPT2VID_AUDIO_FIT_TOLERANCE", 1.0))
     for clip in ok_clips:
         shot_id = int(clip.get("id", 0))
         clip_path = lipsync_of.get(shot_id)
@@ -969,15 +969,8 @@ def render_final(workspace: str | Path | None = None) -> dict:
                 audio_duration = 0.0
 
         # 配音比片段长 → 先提速旁白（上限内），再降速/定格补长画面，
-        # 保证旁白不被截断
-        effective = max(duration, audio_duration)
-        speedup = 1.0
-        if audio_duration > duration + overrun_tolerance and duration > 0.1:
-            speedup = min(speedup_max, audio_duration / (duration * 1.02))
-            if speedup <= 1.005:
-                speedup = 1.0
-            else:
-                effective = max(duration, audio_duration / speedup)
+        # 保证旁白不被截断（与 sync_lips 共用同一套算法）
+        speedup, effective = _audio_fit_plan(duration, audio_duration)
         # 该镜已做过口型同步：配音在同步阶段就按 _audio_fit_plan 定好了
         # （提速 + 定长），这里直接沿用，绝不再改速度——否则唇形错位
         synced = lipsync_audio.get(shot_id)

@@ -39,7 +39,7 @@ compatibility: 与 src/prompt2vid/storyboard.py 的宽容解析配套
 | `visual` | string | ✅ | 画面描述（中文，给人看的） |
 | `image_prompt` | string | ✅ | 英文 SDXL 首帧提示词 |
 | `motion_prompt` | string | ✅ | 英文 LTX 运动描述 |
-| `duration_seconds` | number | ✅ | 3~5 秒 |
+| `duration_seconds` | number | ✅ | 3~5 秒（中间层仍受 LTX 单镜上限约 4.8 秒约束） |
 
 ## `dialogue`：让人物真的开口
 
@@ -55,7 +55,8 @@ compatibility: 与 src/prompt2vid/storyboard.py 的宽容解析配套
 
 规则：
 
-1. **一句一行**，按播放顺序排列；一镜 1~3 句，单句 6~18 字（单镜 3~5 秒）。
+1. **一句一行**，按播放顺序排列；一镜 1~3 句。单句和整镜的字数受
+   **台词字数预算**约束（见下节），不能凭感觉写长句。
 2. `speaker` 必须是 `characters` 里已定义的 id，或 `"旁白"`。写了不存在的
    发言人会被降级成旁白（不报错，但那句话就没有角色声线了）。
 3. 说话角色必须同时出现在本镜 `characters` 里。
@@ -65,6 +66,27 @@ compatibility: 与 src/prompt2vid/storyboard.py 的宽容解析配套
    拖长音"`、`"emotion": "哭腔，声音发颤"`。写情绪而不是动作。
 5. 没有 `dialogue` 的镜头 = 整镜用 `narration` 配一条旁白（旧行为，仍然支持）。
 6. 每句在前端得到自己的字幕时间轴，不会整镜一条长字幕。
+
+## 台词字数预算：写多少字才放得进这一镜
+
+中文旁白约 **2.6 字/秒**，每镜还要留约 0.4 秒收尾静音，一镜能容纳的
+台词是硬上限，不是建议：
+
+| `duration_seconds` | 本镜台词合计上限 |
+| --- | --- |
+| 3 秒 | 6 字 |
+| 4 秒 | 9 字 |
+| 5 秒 | 11 字 |
+
+算法：`字数 ≤ 2.6 × (duration_seconds − 0.4)`（写两句再减 0.25 秒的句间停顿）。
+超过这个长度，配音比画面长，下游只能给旁白提速或降速画面来凑，
+**口型必然对不上、成片也会比需求时长更长**。
+
+整片同理：所有镜头台词字数之和 ≤ `2.6 × (需求时长 − 0.4 × 镜头数)`。
+需求 20 秒、5 镜 → 台词总共不超过约 46 字。要表达的内容更多就
+**多加镜头或提炼句子**，而不是把台词塞长。分镜表写出超预算台词时，
+`storyboard.py` 会告警并把该镜时长抬到够用长度（但 LTX 单镜只生成约
+4.8 秒，超出的部分仍然只能靠后期补）。
 
 ## `characters[].voice` / `characters[].timbre`：不同角色不同嗓子
 
@@ -136,7 +158,8 @@ compatibility: 与 src/prompt2vid/storyboard.py 的宽容解析配套
 ### 4. 时长总和与需求不符
 
 需求 `duration_seconds=20` → 5 镜 × 4 秒 = 20。若写 4 镜 × 4 秒 = 16，
-下游按分镜时长生成，成片就短 4 秒，质检 `duration_match`（±2s）会失败。
+下游按分镜时长生成，成片就短 4 秒，质检 `duration_match`（±3s）会失败。
+反向也一样：台词写太长（见「台词字数预算」）会把成片顶长，同样过不了。
 
 ### 5. JSON 外面套 Markdown
 
@@ -170,7 +193,8 @@ lips moving naturally`），否则 LTX 会生成一张不动的脸，口型同�
 - [ ] 顶层是对象，含非空 `shots`？
 - [ ] 每镜字段齐全（有人物说话时含 `dialogue`）？
 - [ ] 说话角色的 `speaker` 是本镜已定义的 id，且该角色在本镜 `characters` 里？
-- [ ] 台词单句 6~18 字、说话角色的 `motion_prompt` 带口部动作？
+- [ ] 每镜台词字数 ≤ `2.6 × (duration_seconds − 0.4)`、全片台词字数 ≤ `2.6 × (需求时长 − 0.4 × 镜头数)`？
+- [ ] 说话角色的 `motion_prompt` 带口部动作？
 - [ ] `id` 从 1 连续、无重复？
 - [ ] `duration_seconds` 之和 = `total_duration_seconds` = 需求时长？
 - [ ] 镜头数在 4~8 之间？

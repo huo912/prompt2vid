@@ -26,7 +26,7 @@ import math
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .comfyui_client import ltx_clip_seconds
+from .comfyui_client import env_float, ltx_clip_seconds
 
 logger = logging.getLogger("prompt2vid.storyboard")
 
@@ -144,6 +144,13 @@ def estimate_speech_seconds(lines: list[Line] | None, narration: str = "") -> fl
     seconds = sum(len(text) / SPEECH_CHARS_PER_SECOND for text in texts)
     seconds += SPEECH_LINE_GAP_SECONDS * (len(texts) - 1)
     return seconds + SPEECH_TAIL_SECONDS
+
+
+def speech_budget_chars(seconds: float, line_count: int = 1) -> int:
+    """给定镜头时长，反推能念完多少字（供告警/自检用，与估算互逆）。"""
+    usable = seconds - SPEECH_TAIL_SECONDS
+    usable -= SPEECH_LINE_GAP_SECONDS * max(0, line_count - 1)
+    return max(0, int(usable * SPEECH_CHARS_PER_SECOND))
 
 
 def extract_json_value(text: str) -> object:
@@ -352,6 +359,18 @@ def _normalize_shot(
             fixes.append(
                 f"时长 {duration:g} 提升到 {bumped:.1f}（覆盖台词约 {needed:.1f}s）"
             )
+            # 抬时长是兜底，不是解法：分镜原定时长里的台词本来就念不完，
+            # 应精简台词或拆镜（提示词里给了字数预算）
+            line_count = len(dialogue) or (1 if narration else 0)
+            budget = speech_budget_chars(duration, line_count)
+            tried = sum(len(line.text.strip()) for line in dialogue) if dialogue else len(narration)
+            msg = (
+                f"分镜 {shot_id} 台词 {tried} 字约 {needed:.1f}s，超出 {duration:g}s "
+                f"的台词预算（约 {budget} 字），已把时长抬到 {bumped:.1f}s；"
+                f"更稳妥的写法是精简台词或多拆一镜"
+            )
+            fixes.append(msg)
+            logger.warning("%s", msg)
             duration = bumped
 
     # 分镜时长够了也不代表画面拍得出：LTX 单镜帧数上限（显存预算）决定
@@ -441,6 +460,21 @@ def _parse_storyboard(
 
     if not shots:
         raise StoryboardError("分镜表没有任何有效分镜")
+
+    total_speech = sum(estimate_speech_seconds(s.dialogue, s.narration) for s in shots)
+    declared = 0.0
+    if isinstance(data, dict):
+        declared = _to_float(data.get("total_duration_seconds"), 0.0)
+    if declared <= 0:
+        declared = sum(s.duration_seconds for s in shots)
+    if declared > 0 and total_speech > declared + 0.5:
+        logger.warning(
+            "分镜表台词总量约 %.1fs，超过声明的总时长 %.1fs——成片会被顶长，"
+            "质检 duration_match（±%gs）可能不过；请精简台词或增加镜头",
+            total_speech,
+            declared,
+            env_float("PROMPT2VID_DURATION_TOLERANCE", 3.0),
+        )
     return shots, characters
 
 

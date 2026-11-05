@@ -99,6 +99,7 @@
 | `PROMPT2VID_SMOOTH_FPS` | 空 | CPU 补帧（minterpolate）。建议 50，**但人物镜头会被插值出鬼影/扭曲**（脸、手指、衣摆），只在纯风景/固定机位时开 |
 | `PROMPT2VID_PAD_MODE` | slow | 配音比片段长时怎么补画面：`slow`=先降速（上限 `PROMPT2VID_PAD_SLOW_MAX`，默认 1.3）再定格，画面始终正向运动；`freeze`=直接定格；`pingpong`=末段倒放（旧默认，会让嘴型/肢体倒退，别用） |
 | `PROMPT2VID_AUDIO_SPEEDUP_MAX` | 1.2 | 配音明显超长时先给旁白提速（atempo 变速不变调），比长时间定格好；设 1 关闭 |
+| `PROMPT2VID_AUDIO_FIT_TOLERANCE` | 0.3 | 配音只超长一点（≤0.3s）时不补画面、直接放行，避免为几十分之一秒把成片撑长 |
 | `COMFYUI_T2I_CFG` | 7 | SDXL Base 用 7；RealVisXL 等写实系用 6 左右 |
 | `COMFYUI_T2I_SAMPLER` / `_SCHEDULER` | dpmpp_2m / karras | 一般无需改 |
 | `COMFYUI_LTX_MAX_SHIFT` / `_BASE_SHIFT` | 2.05 / 0.95 | LTX 噪声调度（官方 simple 工作流按 512-768p 调校）。720p 长镜头若出现结构漂移，可尝试 max_shift 2.2-2.4 |
@@ -232,6 +233,14 @@ curl -L -o models/tts/zh_CN-huayan-medium.onnx.json \
 > 分镜阶段已按 `estimate_speech_seconds` 给出告警（`fixes` 里出现
 > 「超出 LTX 单镜上限」）。要么删台词/减镜数，要么抬上限（4090/5090 可试
 > 193/257 帧，需实测显存）。
+>
+> **台词字数预算**：中文旁白约 2.6 字/秒，一镜能念完的字数上限是
+> `2.6 × (duration_seconds − 0.4)`——3 秒约 6 字、4 秒约 9 字、5 秒约 11 字；
+> 全片台词总量 ≤ `2.6 × (需求时长 − 0.4 × 镜头数)`。超预算时分镜阶段会把
+> 该镜时长抬到够用长度（告警写进 `fixes`），但**抬时长不等于拍得出**：
+> 抬到 9s 的镜头仍只生成 4.8s。想让 `duration_match` 稳定通过，正确做法是
+> 在分镜表里把台词压进预算（`config/skills/storyboard-schema-guide/SKILL.md`
+> 已写明这条契约并列入自检清单），而不是加长镜头。
 
 ## 镜头过渡（PROMPT2VID_TRANSITION）
 

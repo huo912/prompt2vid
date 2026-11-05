@@ -20,7 +20,8 @@ def run_quality_checks() -> str:
     自动读取工作目录下的 final/final.mp4、requirement.json 与三个
     manifest 清单，逐项核验：
     1. 成片存在且可读；
-    2. 时长与需求 duration_seconds 误差 ±2 秒内；
+    2. 时长与需求 duration_seconds 误差在容差内（默认 ±3 秒，
+       PROMPT2VID_DURATION_TOLERANCE）；
     3. 分辨率达标（边长 ≥ 448 且像素数 ≥ 512x768 的 90%，
        兼容跟随首帧宽高比得到的 480x832 / 576x1024 竖屏画幅）；
     4. 包含音轨；

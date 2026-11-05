@@ -150,6 +150,47 @@ def test_shot_longer_than_ltx_clip_limit_is_flagged(tmp_path: Path):
     assert any("LTX 单镜上限" in fix for fix in shots[0].fixes)
 
 
+def test_shot_over_speech_budget_is_flagged(tmp_path: Path):
+    """台词超出时长对应的字数预算时，告警并给出预算字数。"""
+    data = {
+        "shots": [
+            {"id": 1, "narration": "这句旁白明显超出四秒钟能念完的字数",
+             "image_prompt": "a", "duration_seconds": 4},
+        ]
+    }
+    path = _write(tmp_path / "storyboard.json", json.dumps(data, ensure_ascii=False))
+    shots = storyboard.load_storyboard(path)
+    budget_fixes = [f for f in shots[0].fixes if "台词预算" in f]
+    assert budget_fixes, shots[0].fixes
+    # 4 秒 ≈ 9 字（(4-0.4)×2.6）
+    assert f"约 {storyboard.speech_budget_chars(4)} 字" in budget_fixes[0]
+    assert storyboard.speech_budget_chars(4) == 9
+
+
+def test_speech_budget_chars_subtracts_line_gaps():
+    assert storyboard.speech_budget_chars(5) == 11
+    # 两句要扣一次句间停顿（0.25s ≈ 0.65 字，5 秒时仍落在 11 字）
+    assert storyboard.speech_budget_chars(5, 2) == 11
+    assert storyboard.speech_budget_chars(4, 3) == 8
+    assert storyboard.speech_budget_chars(0.2) == 0
+
+
+def test_total_speech_over_declared_duration_is_logged(tmp_path: Path, caplog):
+    data = {
+        "total_duration_seconds": 6,
+        "shots": [
+            {"id": 1, "narration": "第一句旁白内容较长", "image_prompt": "a",
+             "duration_seconds": 3},
+            {"id": 2, "narration": "第二句旁白内容也较长", "image_prompt": "b",
+             "duration_seconds": 3},
+        ],
+    }
+    path = _write(tmp_path / "storyboard.json", json.dumps(data, ensure_ascii=False))
+    with caplog.at_level("WARNING", logger="prompt2vid.storyboard"):
+        storyboard.load_storyboard(path)
+    assert any("台词总量" in r.getMessage() for r in caplog.records)
+
+
 def test_read_manifest(tmp_path: Path):
     path = _write(
         tmp_path / "manifest.json",
