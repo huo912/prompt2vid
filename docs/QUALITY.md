@@ -208,8 +208,10 @@ curl -L -o models/tts/zh_CN-huayan-medium.onnx.json \
 ## 口型同步（LatentSync）
 
 配音阶段之后的增强媒体阶段：用每镜音轨（角色台词 + 旁白）驱动片段人物唇形，
-嘴动与台词对上；配音比片段长时自动往返补帧（台词零截断），渲染优先使用
-`lipsync/shot_<id>.mp4`。约需 20GB 显存（4090/5090 档可用），安装见
+嘴动与台词对上。配音比片段长时，同步阶段**先**按渲染同一套算法把配音提速
+定长（`PROMPT2VID_AUDIO_SPEEDUP_MAX`），再把画面正向补长（`slow` 降速 +
+定格末帧）送给节点按配音裁齐——渲染阶段直接沿用这份配音，不会二次提速，
+所以唇形与语音严格同步。约需 20GB 显存（4090/5090 档可用），安装见
 [LOCAL_SETUP.md §8](LOCAL_SETUP.md)。
 
 | 变量 | 默认 | 说明 |
@@ -218,11 +220,18 @@ curl -L -o models/tts/zh_CN-huayan-medium.onnx.json \
 | `PROMPT2VID_LIPSYNC_EXPRESSION` | 1.5 | 唇形表现力（guidance scale）：1.0-1.5 平静语速自然；2.0-3.0 演讲式夸张 |
 | `PROMPT2VID_LIPSYNC_STEPS` | 20 | 推理步数：20 够用；30-50 更慢更稳 |
 | `PROMPT2VID_LIPSYNC_CRF` | 19 | 产物 mp4 的 x264 CRF |
+| `PROMPT2VID_LIPSYNC_SILENT_PAD` | 0.1 | 节点给配音尾部补的静音秒数（防裁掉尾音）。别调大：每镜都多这么多时长，6 镜就会把成片撑出容差 |
 
 > **重要**：LatentSync 只处理**真人正脸**——`PROMPT2VID_STYLE=anime` 的
-> 动漫脸、侧脸、远景小脸、无人脸镜头会失败，该镜自动保留原片段
-> （`lipsync/manifest.json` 记录原因，渲染不受影响）。想要口型生效：
-> 用 `realistic` 风格，且分镜画面包含清晰的人物面部（近景/中景）。
+> 动漫脸、侧脸、远景小脸、无人脸镜头会失败，该镜自动保留原片段并记为
+> `skipped`（`lipsync/manifest.json` 记录原因，渲染不受影响）。想要口型
+> 生效：用 `realistic` 风格，且分镜画面包含清晰的人物面部（近景/中景）。
+
+> **时长预算**：LTX 单镜有帧数上限（`COMFYUI_LTX_MAX_FRAMES`，默认 121 帧
+> ≈ 4.8s），台词若比这更长，画面只能靠降速/定格补长——口型再好也会拖。
+> 分镜阶段已按 `estimate_speech_seconds` 给出告警（`fixes` 里出现
+> 「超出 LTX 单镜上限」）。要么删台词/减镜数，要么抬上限（4090/5090 可试
+> 193/257 帧，需实测显存）。
 
 ## 镜头过渡（PROMPT2VID_TRANSITION）
 
@@ -263,7 +272,7 @@ curl -L -o models/tts/zh_CN-huayan-medium.onnx.json \
 |------|------|------|
 | 配音像读课文 | 采样用束搜索 + 无情感控制 | 已默认关束搜索 + EmotionTextNode 全局基调；台词逐句写 `emotion` 短语按句调语气 |
 | 每镜结尾卡一下再切 | 过渡垫片是定格末帧 | 过渡垫片已独立为 `freeze_seconds`（只定格、不参与配音补长）；配音超长补长的垫片默认 `PROMPT2VID_PAD_MODE=slow`（先降速再定格），避免倒放 |
-| 口型和音频对不上 | ① 配音比片段长时旧默认 `pingpong` 会倒放末段，嘴型倒退 ② 分镜时长没覆盖台词 ③ 未装口型同步节点 | ① 已默认 `slow` 垫片（画面始终正向，`PROMPT2VID_PAD_MODE`）② 分镜时长自动按台词估算抬高，超长旁白先提速（`PROMPT2VID_AUDIO_SPEEDUP_MAX`，默认 1.2）③ 装 LatentSync（见 [LOCAL_SETUP.md §8](LOCAL_SETUP.md)），动漫/侧脸镜头不适用 |
+| 口型和音频对不上 | ① 旧默认 `pingpong` 会倒放末段，嘴型倒退 ② 渲染阶段二次提速配音（唇形按原速、语音被快放）③ 分镜时长没覆盖台词 ④ 未装口型同步节点 | ① 已默认 `slow` 垫片（画面始终正向，`PROMPT2VID_PAD_MODE`）；口型同步阶段改用本地补帧 + 节点 `normal` 裁齐 ② 同步阶段用 `_audio_fit_plan` 先定好配音，渲染沿用同一份（`PROMPT2VID_AUDIO_SPEEDUP_MAX`，默认 1.2）③ 分镜时长自动按台词估算抬高 ④ 装 LatentSync（见 [LOCAL_SETUP.md §8](LOCAL_SETUP.md)），动漫/侧脸镜头不适用 |
 | 人物某个部位变形/鬼影 | 补帧 minterpolate 在脸、手指、衣摆上插出伪影 | 默认关闭 `PROMPT2VID_SMOOTH_FPS`；只在纯风景/固定机位时开 |
 | 成片无旁白（有字幕没人声） | TTS 全部失败 → 静音占位（edge-tts 被拦 403 最常见） | 装 IndexTTS-2.5 本地推理（首选，见 [LOCAL_SETUP.md §7](LOCAL_SETUP.md)）；或本地 piper 离线配音（见上文 §配音）；质检的 `voiceover_audible` 会明确报出 |
 | 成片有持续底噪/嗡声 | 旧版 loudnorm 把静音占位的量化噪声满增益放大 | 已修复（静音输入直接输出纯静音）；老运行用 `--resume --from render` 重渲染 |

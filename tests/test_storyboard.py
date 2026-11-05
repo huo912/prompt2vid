@@ -136,6 +136,20 @@ def test_load_storyboard_errors(tmp_path: Path):
         storyboard.load_storyboard(path)
 
 
+def test_shot_longer_than_ltx_clip_limit_is_flagged(tmp_path: Path):
+    """台词超出 LTX 单镜上限时提前告警（否则成片只能靠降速/补帧硬撑）。"""
+    data = {
+        "shots": [
+            {"id": 1, "narration": "这是一段很长的旁白大概要念十秒钟左右才能念完",
+             "image_prompt": "a", "duration_seconds": 4},
+        ]
+    }
+    path = _write(tmp_path / "storyboard.json", json.dumps(data, ensure_ascii=False))
+    shots = storyboard.load_storyboard(path)
+    assert shots[0].duration_seconds > 4
+    assert any("LTX 单镜上限" in fix for fix in shots[0].fixes)
+
+
 def test_read_manifest(tmp_path: Path):
     path = _write(
         tmp_path / "manifest.json",

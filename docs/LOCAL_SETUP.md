@@ -784,6 +784,226 @@ ssh -p 40376 root@connect.westb.seetacloud.com '
 > 其它自定义节点（IndexTTS 等）若报同样的 Traceback，同理处理：所有
 > `torchaudio.save(...)` 调用都需要绕过 TorchCodec。
 
+### 8.4 云 GPU（AutoDL 等 Linux）实战：手工备齐权重（推荐）
+
+> 常驻显存约 **20GB**；4090/24GB 能用，但若同一台机还挂着 IndexTTS
+> （约 7GB）或 LTX 缓存，跑 LatentSync 前先重启 ComfyUI 释放显存。
+
+#### 1）装节点：用 tarball，别指望 `git clone`
+
+云机对 `codeload.github.com` 的裸连经常 GnuTLS 中断，直接下 tarball 解压：
+
+```bash
+cd /root/autodl-tmp/ComfyUI/custom_nodes
+mkdir -p /root/dl && cd /root/dl
+curl -fL -o ls.tar.gz   https://codeload.github.com/ShmuelRonen/ComfyUI-LatentSyncWrapper/tar.gz/refs/heads/main
+curl -fL -o vhs.tar.gz  https://codeload.github.com/Kosinkadink/ComfyUI-VideoHelperSuite/tar.gz/refs/heads/main
+tar xzf ls.tar.gz  -C /root/autodl-tmp/ComfyUI/custom_nodes   # 目录名带 -main，ComfyUI 照样能加载
+tar xzf vhs.tar.gz -C /root/autodl-tmp/ComfyUI/custom_nodes
+```
+
+依赖（`requirements.txt` 里若有 `git+https://` 行先删掉，内网/云机必失败）：
+
+```bash
+/root/miniconda3/bin/python -m pip install -i https://mirrors.aliyun.com/pypi/simple \
+  cython insightface
+```
+
+> 装 `insightface` 会把 `protobuf` 抬到 7.x，`descript-audiotools` 会报
+> `<3.20` 的警告——只是警告，不影响 IndexTTS 节点运行。
+
+#### 2）权重清单（缺一个就跑不起来）
+
+`<node>` = `custom_nodes/ComfyUI-LatentSyncWrapper-main`，全部放在
+`<node>/checkpoints/` 下：
+
+| 相对路径 | 大小（字节） | 来源 |
+|----------|--------------|------|
+| `latentsync_unet.pt` | 5,072,222,488 | `hf-mirror.com/ByteDance/LatentSync-1.6/resolve/main/latentsync_unet.pt` |
+| `whisper/tiny.pt` | 75,572,083 | `ByteDance/LatentSync-1.6` 同仓库 |
+| `auxiliary/sfd_face.pth` | 89,844,381 | `ByteDance/LatentSync-1.6` 同仓库 |
+| `vae/config.json` | 547 | `stabilityai/sd-vae-ft-mse` |
+| `vae/diffusion_pytorch_model.safetensors` | 334,643,276 | 同上 |
+| `vae/sd-vae-ft-mse.safetensors` | 符号链接 | → `diffusion_pytorch_model.safetensors` |
+| `auxiliary/models/buffalo_l/*.onnx` | 见下 | `hf-mirror.com/public-data/insightface/resolve/main/models/buffalo_l.zip`（288,621,354） |
+
+`buffalo_l.zip` 解压出来是**平铺的 5 个 onnx**，而 insightface 要求它们在
+`buffalo_l/` 子目录里，必须自己建目录：
+
+```bash
+CK=/root/autodl-tmp/ComfyUI/checkpoints            # 见第 3 步的软链
+M=$CK/auxiliary/models
+mkdir -p $M/buffalo_l
+cd /tmp && curl -fL -o buffalo_l.zip \
+  https://hf-mirror.com/public-data/insightface/resolve/main/models/buffalo_l.zip
+/root/miniconda3/bin/python -c "import zipfile;zipfile.ZipFile('/tmp/buffalo_l.zip').extractall('$M/buffalo_l')"
+ls $M/buffalo_l   # 1k3d68.onnx 2d106det.onnx det_10g.onnx genderage.onnx w600k_r50.onnx
+```
+
+`nodes.py` 还会在 `~/.latentsync16_models/` 里找 `s3fd-e19a316812.pth`（89,843,225
+字节），没有就现下——它的下载地址是**直连 huggingface.co**，国内会卡住节点
+初始化，提前放好：
+
+```bash
+mkdir -p ~/.latentsync16_models
+curl -fL -o ~/.latentsync16_models/s3fd-e19a316812.pth \
+  https://hf-mirror.com/vinthony/SadTalker/resolve/main/hub/checkpoints/s3fd-619a316812.pth
+```
+
+#### 3）关键：`<ComfyUI>/checkpoints` 必须指到节点目录
+
+`latentsync/utils/face_detector.py` 里写死了
+
+```python
+FaceAnalysis(root="checkpoints/auxiliary", ...)   # 相对进程 CWD
+```
+
+而 ComfyUI 的 CWD 是 `<ComfyUI>`，所以人脸检测找的是
+`<ComfyUI>/checkpoints/auxiliary/models/buffalo_l`，不是节点目录下的那份。
+做一个软链一劳永逸（若 `<ComfyUI>/checkpoints` 已是实体目录，改成往
+`<ComfyUI>/checkpoints/auxiliary/` 里同样铺一份即可）：
+
+```bash
+cd /root/autodl-tmp/ComfyUI
+[ -e checkpoints ] || ln -s custom_nodes/ComfyUI-LatentSyncWrapper-main/checkpoints checkpoints
+ls -ld checkpoints        # checkpoints -> custom_nodes/ComfyUI-LatentSyncWrapper-main/checkpoints
+```
+
+#### 4）下载慢：用 aria2 多线程 + 断点续传
+
+`hf-mirror.com` 单连接只有 200 KB/s 量级，`aria2c -x16 -s16 -c` 能跑到
+2 MB/s 以上；`curl -C -` 中途被杀掉后**不要删文件**，直接
+`aria2c -c` 续传即可：
+
+```bash
+CK=/root/autodl-tmp/ComfyUI/checkpoints
+aria2c -c -x16 -s16 -k 4M --file-allocation=none --max-tries=0 \
+  -d $CK -o latentsync_unet.pt \
+  https://hf-mirror.com/ByteDance/LatentSync-1.6/resolve/main/latentsync_unet.pt
+```
+
+> **验证完成**只看两件事：进程真的退出了（`pgrep -a aria2c` 为空）+
+> `stat -c %s latentsync_unet.pt` 等于 5072222488。文件大小到 5.07GB 时
+> aria2 可能还在回填前面的分段，别提前动手。
+
+#### 5）自检 + 重启（云机通常没装 ComfyUI-Manager）
+
+```bash
+# torchaudio 能不能写文件（torchaudio>=2.9 需要 torchcodec；这里若 save OK 就不用打补丁）
+/root/miniconda3/bin/python -c "import torch,torchaudio;torchaudio.save('/tmp/t.wav',torch.zeros(1,16000),16000);print('save OK')"
+
+# 人脸检测能不能起（会 fallback 到 CPU，仅慢一点）
+cd /root/autodl-tmp/ComfyUI
+/root/miniconda3/bin/python -c "
+from insightface.app import FaceAnalysis
+FaceAnalysis(allowed_modules=['detection','landmark_2d_106'],root='checkpoints/auxiliary').prepare(ctx_id=0,det_size=(512,512))
+print('face ready')"
+
+# 重启：先记下原参数，再停、再起
+pgrep -af 'main.py'
+pkill -f 'ComfyUI/main.py'
+cd /root/autodl-tmp/ComfyUI && \
+  nohup /root/miniconda3/bin/python -u main.py --listen 127.0.0.1 --port 8188 \
+  > comfyui.latentsync.log 2>&1 &
+
+sleep 25 && curl -s http://127.0.0.1:8188/object_info/LatentSyncNode | head -c 120
+tail -n 30 comfyui.latentsync.log | grep -iE 'import|error|traceback'
+```
+
+`latentsync_unet.pt` 5GB 加载较慢，**第一次** `LatentSyncNode` 调用会额外花
+1–3 分钟；`prompt2vid` 侧已把 `/history` 轮询超时拉长，不要因为看起来"卡住"
+就 Ctrl-C。
+
+### 8.5 常见报错：`module 'torchvision.io' has no attribute 'write_video'`
+
+torchvision **≥ 0.23 删除了整个视频 IO 接口**（`torchvision.io.write_video` /
+`read_video`，以及 `pts_unit` 参数），而 `ComfyUI-LatentSyncWrapper` 的
+`nodes.py` 仍在调用，于是节点一执行就 `AttributeError`。
+
+从 ComfyUI 的报错里可以确认故障点在**最后一步**——`executed` 里已经出现
+`load_video` / `load_audio` / `adjust`，说明权重、人脸检测、音视频对齐都没问题，
+只是把结果帧写成临时 mp4 时炸的：
+
+```
+executed: ['load_video', 'load_audio', 'adjust']
+exception_message: "module 'torchvision.io' has no attribute 'write_video'"
+  File ".../ComfyUI-LatentSyncWrapper-main/nodes.py", line 575, in inference
+    io.write_video(temp_video_path, frames_cpu, fps=25, video_codec='h264')
+```
+
+**不要降级 torchvision**（会连带破坏 ComfyUI 的 CUDA 轮子）。在 `nodes.py`
+顶部（`# Function to find ComfyUI directories` 之前）插入两个小工具函数：
+
+```python
+def _write_frames_video(path, frames_u8, fps=25):
+    """torchvision>=0.23 删掉了 torchvision.io.write_video，改用 imageio_ffmpeg(libx264)。"""
+    import imageio_ffmpeg
+    import numpy as np
+
+    arr = frames_u8.detach().cpu().numpy() if hasattr(frames_u8, "detach") else np.asarray(frames_u8)
+    if arr.ndim == 3:
+        arr = arr[None]
+    if arr.dtype != np.uint8:
+        arr = np.clip(arr, 0, 255).astype(np.uint8)
+    height, width = int(arr.shape[1]), int(arr.shape[2])
+    writer = imageio_ffmpeg.write_frames(
+        str(path), (width, height), fps=float(fps), codec="libx264",
+        pix_fmt_in="rgb24", pix_fmt_out="yuv420p",
+        output_params=["-crf", "17", "-preset", "veryfast"],
+    )
+    writer.send(None)
+    try:
+        for frame in arr:
+            writer.send(np.ascontiguousarray(frame))
+    finally:
+        writer.close()
+
+
+def _read_frames_video(path):
+    """torchvision>=0.23 删掉了 torchvision.io.read_video，改用 cv2；返回 (T,H,W,C) RGB uint8。"""
+    import cv2
+    import numpy as np
+
+    cap = cv2.VideoCapture(str(path))
+    if not cap.isOpened():
+        raise RuntimeError(f"cv2 打不开视频: {path}")
+    frames = []
+    try:
+        while True:
+            ok, frame = cap.read()
+            if not ok:
+                break
+            frames.append(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+    finally:
+        cap.release()
+    if not frames:
+        raise RuntimeError(f"视频里读不出任何帧: {path}")
+    return np.stack(frames)
+```
+
+再把两处调用换掉（`inference()` 里）：
+
+```python
+# 写：原 io.write_video(temp_video_path, frames_cpu, fps=25, video_codec='h264')
+_write_frames_video(temp_video_path, frames_cpu, fps=25)
+# 读：原 processed_frames = io.read_video(output_video_path, pts_unit='sec')[0]
+processed_frames = torch.from_numpy(_read_frames_video(output_video_path))
+```
+
+改完 `py_compile` 校验，然后**必须重启 ComfyUI**（改的是节点源码，热重载不生效）：
+
+```bash
+/root/miniconda3/bin/python -m py_compile \
+  /root/autodl-tmp/ComfyUI/custom_nodes/ComfyUI-LatentSyncWrapper-main/nodes.py
+```
+
+> 为什么用 `imageio_ffmpeg` 的 libx264 而不是 cv2 的 `mp4v`：中间产物马上要被
+> LatentSync 内部的 decord 读回来，h264 兼容性最好；`imageio_ffmpeg` 自带静态
+> ffmpeg 且编进了 libx264，云机上不需要另装系统编码器。
+>
+> 顺带一提：`nodes.py` 里写死了 `comfyui_temp = "D:\\ComfyUI_windows\\temp"`
+> （Windows 路径），Linux 上这段 `os.path.exists` 直接为假、走不到，可以无视。
+
 ---
 
 ## 9. 可选模型替换（非必需）

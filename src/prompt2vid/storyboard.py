@@ -21,9 +21,14 @@ markdown 代码栅栏包裹。本模块做"宽容输入"处理：
 from __future__ import annotations
 
 import json
+import logging
 import math
 from dataclasses import dataclass, field
 from pathlib import Path
+
+from .comfyui_client import ltx_clip_seconds
+
+logger = logging.getLogger("prompt2vid.storyboard")
 
 STORYBOARD_FILE = "storyboard.json"
 
@@ -348,6 +353,18 @@ def _normalize_shot(
                 f"时长 {duration:g} 提升到 {bumped:.1f}（覆盖台词约 {needed:.1f}s）"
             )
             duration = bumped
+
+    # 分镜时长够了也不代表画面拍得出：LTX 单镜帧数上限（显存预算）决定
+    # 实际最长秒数。台词超出的部分只能靠降速/补帧吸收，口型必然对不上，
+    # 这里提前告警（不截断台词，交给人决定是删词还是抬上限）。
+    clip_limit = ltx_clip_seconds()
+    if needed > clip_limit + 0.05:
+        msg = (
+            f"分镜 {shot_id} 台词约 {needed:.1f}s 超出 LTX 单镜上限 {clip_limit:.1f}s"
+            f"（COMFYUI_LTX_MAX_FRAMES），成片需降速/补帧覆盖配音"
+        )
+        fixes.append(msg)
+        logger.warning("%s", msg)
 
     # 角色一致性契约：出场角色的外观描述必须逐字出现在 image_prompt。
     # LLM 漏写时代码兜底补入（不修改 storyboard.json 文件，仅内存修复）。

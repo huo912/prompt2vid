@@ -131,6 +131,23 @@ def ltx_fps() -> float:
     fps = env_float("COMFYUI_LTX_FPS", LTX_FPS)
     return fps if fps > 0 else LTX_FPS
 
+
+# LTX 单镜帧数上限（8n+1，受显存预算约束）。超出该上限的分镜实际只生成
+# 这么长，配音多出来的部分只能靠降速/补帧吸收。
+DEFAULT_LTX_MAX_FRAMES = 121
+MIN_LTX_FRAMES = 9  # 8*1+1
+
+
+def ltx_max_frames() -> int:
+    """LTX 单镜帧数上限（COMFYUI_LTX_MAX_FRAMES，按 8n+1 归一）。"""
+    frames = max(MIN_LTX_FRAMES, env_int("COMFYUI_LTX_MAX_FRAMES", DEFAULT_LTX_MAX_FRAMES))
+    return 8 * ((frames - 1) // 8) + 1
+
+
+def ltx_clip_seconds() -> float:
+    """LTX 单镜能生成的最长秒数（帧数上限 ÷ 帧率，默认约 4.8s）。"""
+    return (ltx_max_frames() - 1) / ltx_fps()
+
 # 种子计数器：PROMPT2VID_SEED 固定后，逐次 +1 保证分镜间种子不同但整跑可复现
 _SEED_COUNTER = itertools.count()
 
@@ -1232,7 +1249,7 @@ def build_tts_workflow(
 def build_lipsync_workflow(
     clip_name: str,
     audio_name: str,
-    mode: str = "pingpong",
+    mode: str = "normal",
     fps: float | None = None,
     filename_prefix: str = "prompt2vid_lipsync",
     seed: int | None = None,
@@ -1247,14 +1264,16 @@ def build_lipsync_workflow(
     → LatentSyncNode(唇形重绘) → VHS_VideoCombine(h264 mp4)
 
     LatentSync 只认 25fps 且需要与音频等长的帧序列：force_rate 强制
-    25fps，VideoLengthAdjuster 负责长度对齐——mode=pingpong 在配音更长
-    时把片段往返补帧到配音长度（旁白零截断），mode=normal 在片段更长
-    时裁掉多余帧并给音频尾部补静音。
+    25fps，VideoLengthAdjuster 负责长度对齐——mode=normal 在片段更长
+    时裁掉多余帧并给音频尾部补一点静音。调用方（sync_lips）会先把
+    配音提速定长、把画面正向补长再上传，所以这里用 normal；pingpong
+    的"末段倒放续接"会让嘴型与肢体回退，只在极端兜底时手动指定。
 
     Args:
         clip_name / audio_name: 已上传到 ComfyUI input 目录的片段与配音
             文件名（调用方先 upload_file）。
-        mode: "pingpong"（配音更长，补帧）或 "normal"（片段更长，裁帧）。
+        mode: "normal"（片段已足够长，裁帧并补尾部静音，默认）或
+            "pingpong"（配音更长时往返补帧，画面会回放）。
         fps: 帧率，缺省与 LTX 一致（COMFYUI_LTX_FPS，默认 25）。
         expression: lips_expression（即 guidance_scale），缺省读
             PROMPT2VID_LIPSYNC_EXPRESSION（默认 1.5，平静语速自然）。
@@ -1294,7 +1313,11 @@ def build_lipsync_workflow(
                 "audio": ["load_audio", 0],
                 "mode": mode,
                 "fps": fps_value,
-                "silent_padding_sec": 0.5,
+                # 尾部静音只用来防裁掉最后一个音节，越小越好：它是
+                # 每个镜头都会多出来的时长（6 镜 × 0.5s = 3s 误差）
+                "silent_padding_sec": env_float(
+                    "PROMPT2VID_LIPSYNC_SILENT_PAD", 0.1
+                ),
             },
         },
         "latentsync": {

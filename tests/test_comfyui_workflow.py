@@ -578,7 +578,9 @@ def test_lipsync_workflow_structure(monkeypatch):
     assert wf["load_audio"]["inputs"]["audio"] == "shot_1.mp3"
     adjust = wf["adjust"]
     assert adjust["class_type"] == "VideoLengthAdjuster"
-    assert adjust["inputs"]["mode"] == "pingpong"
+    # normal：只裁帧/补静音，绝不倒放（pingpong 会把画面回放一遍）
+    assert adjust["inputs"]["mode"] == "normal"
+    assert adjust["inputs"]["silent_padding_sec"] <= 0.15
     assert adjust["inputs"]["fps"] == 25.0
     assert adjust["inputs"]["images"] == ["load_video", 0]
     assert adjust["inputs"]["audio"] == ["load_audio", 0]

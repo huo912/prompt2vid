@@ -25,7 +25,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-from . import ffmpeg_ops, tts
+from . import comfyui_client, ffmpeg_ops, tts
 from .comfyui_client import (
     ComfyUITaskError,
     ComfyUIClient,
@@ -70,6 +70,10 @@ _LIPSYNC_NODES = (
     "LatentSyncNode", "VideoLengthAdjuster", "VHS_LoadVideo", "VHS_VideoCombine",
 )
 
+# 送进 LatentSync 的画面比配音多留一点：节点会把音频补一小段静音再按音频
+# 裁视频，画面富余才走"裁"而不是"补"，避免它自己补帧
+_LIPSYNC_TAIL = 0.15
+
 # LTX 帧数约束：length = 8n+1；帧率（COMFYUI_LTX_FPS，默认 25）与
 # 上限可配，帧率读取统一走 comfyui_client.ltx_fps（工作流同源）
 DEFAULT_LTX_MAX_FRAMES = 121
@@ -99,11 +103,16 @@ def _ltx_prompt(shot: Shot) -> str:
 def frames_for_duration(seconds: float) -> int:
     """把每镜时长换算为 LTX 帧数（8n+1，且不超过显存预算上限）。"""
     fps = ltx_fps()
-    max_frames = max(MIN_FRAMES, env_int("COMFYUI_LTX_MAX_FRAMES", DEFAULT_LTX_MAX_FRAMES))
+    max_frames = comfyui_client.ltx_max_frames()
     target = max(MIN_FRAMES, math.ceil(seconds * fps))
     length = 8 * math.ceil((target - 1) / 8) + 1
     if length > max_frames:
-        length = 8 * ((max_frames - 1) // 8) + 1
+        logger.warning(
+            "video: 分镜时长 %.1fs 超出 LTX 单镜上限 %.1fs（COMFYUI_LTX_MAX_FRAMES=%d），"
+            "实际只生成 %.1fs，多出的配音只能靠降速/补帧吸收",
+            seconds, (max_frames - 1) / fps, max_frames, (max_frames - 1) / fps,
+        )
+        length = max_frames
     return max(MIN_FRAMES, length)
 
 
@@ -556,18 +565,59 @@ class _LipSyncJob:
     dest: Path
 
 
-def _audio_drives(clip_path: Path, audio_path: Path) -> bool:
-    """配音是否比片段长（决定 VideoLengthAdjuster 的对齐方向）。
-
-    探测失败按 True 处理：pingpong 方向下音频只会被静音补齐、绝不被
-    裁剪，是保住旁白的失败安全方向。
-    """
+def _audio_seconds(path: Path) -> float:
     try:
-        clip_seconds = ffmpeg_ops.probe_file(clip_path)["duration_seconds"]
-        audio_seconds = ffmpeg_ops.probe_file(audio_path)["duration_seconds"]
+        return float(ffmpeg_ops.probe_file(path)["duration_seconds"])
     except (RuntimeError, FileNotFoundError):
-        return True
-    return audio_seconds > clip_seconds
+        return 0.0
+
+
+def _extend_clip_to(clip_path: Path, seconds: float, dest: Path) -> Path:
+    """把片段正向补到指定长度（降速 + 定格末帧），失败则原样返回。
+
+    送进 LatentSync 前先补齐，节点就只需按配音裁齐（mode=normal）——
+    节点自带的 pingpong 是"末段倒放续接"，会让嘴型和肢体往回退，正是
+    "口型对不上、部位变形"的根源之一。补帧逻辑复用渲染阶段的
+    normalize_clip（PROMPT2VID_PAD_MODE=slow）。
+    """
+    clip_seconds = _audio_seconds(clip_path)
+    extend = seconds - clip_seconds
+    if extend <= 0.05:
+        return clip_path
+    try:
+        return ffmpeg_ops.normalize_clip(clip_path, dest, extend, pad_mode="slow")
+    except RuntimeError:
+        return clip_path
+
+
+def _is_no_face_error(error: str) -> bool:
+    """LatentSync 的"未检出人脸"报错是否只是内容限制。
+
+    LatentSync 逐帧做人脸对齐，任何一帧检不到正脸就抛 Face not detected。
+    空镜、动物、人物转身出画的镜头本来就没有可驱动的嘴——这属于素材内容
+    限制，不是流程故障，因此记为 skipped（保留原片段）而不是 failed，
+    免得每次运行都刷一堆假失败。
+    """
+    return "face not detected" in error.lower()
+
+
+def _audio_fit_plan(clip_seconds: float, audio_seconds: float) -> tuple[float, float]:
+    """配音超出画面时怎么补：返回 (旁白提速倍数, 该镜有效时长)。
+
+    先按 PROMPT2VID_AUDIO_SPEEDUP_MAX（默认 1.2）给旁白提速，剩余缺口
+    再让画面降速/定格补长。render 与 sync_lips 必须共用同一套算法：
+    口型同步要按最终方案先把配音处理掉，否则渲染阶段再提速，唇形和
+    语音就会错开（画面按原速说完整句，音频却快放了一遍）。
+    """
+    longest = max(clip_seconds, audio_seconds)
+    speedup_max = max(1.0, env_float("PROMPT2VID_AUDIO_SPEEDUP_MAX", 1.2))
+    tolerance = max(0.0, env_float("PROMPT2VID_AUDIO_FIT_TOLERANCE", 1.0))
+    if clip_seconds <= 0.1 or audio_seconds <= clip_seconds + tolerance:
+        return 1.0, longest
+    speedup = min(speedup_max, audio_seconds / (clip_seconds * 1.02))
+    if speedup <= 1.005:
+        return 1.0, longest
+    return speedup, max(clip_seconds, audio_seconds / speedup)
 
 
 def sync_lips(workspace: str | Path | None = None) -> dict:
@@ -600,6 +650,15 @@ def sync_lips(workspace: str | Path | None = None) -> dict:
     ok: dict[int, Path] = {}
     errors: dict[int, str] = {}
     skipped: dict[int, str] = {}
+    plans: dict[int, dict[str, Any]] = {}
+    prior: dict[int, dict] = {}
+    try:
+        prior = {
+            int(e.get("id", 0)): e
+            for e in read_manifest(ws / LIPSYNC_DIR / "manifest.json")
+        }
+    except (FileNotFoundError, ValueError):
+        prior = {}
     jobs: list[_LipSyncJob] = []
     for clip in clips:
         if clip.get("status") != "ok":
@@ -608,6 +667,13 @@ def sync_lips(workspace: str | Path | None = None) -> dict:
         dest = ws / LIPSYNC_DIR / f"shot_{shot_id}.mp4"
         if dest.is_file() and dest.stat().st_size > 0:
             ok[shot_id] = dest  # 断点续跑
+            old = prior.get(shot_id, {})
+            if old.get("audio"):
+                plans[shot_id] = {
+                    "audio": old["audio"],
+                    "speedup": old.get("speedup", 1.0),
+                    "audio_seconds": old.get("audio_seconds", 0.0),
+                }
             continue
         clip_path = resolve_in_workspace(clip.get("path", clip.get("video", "")), ws)
         if not clip_path.is_file():
@@ -636,27 +702,46 @@ def sync_lips(workspace: str | Path | None = None) -> dict:
             else:
                 def make_workflow(job: _LipSyncJob) -> dict:
                     # 上传在提交前串行完成；失败作为该镜错误（保留原片段）
+                    # 1. 先把配音按"最终方案"定下来：超出画面的部分用 atempo
+                    #    提速（与渲染同一套 _audio_fit_plan），此后渲染阶段不再
+                    #    改速度，唇形才不会和语音错位
+                    speedup, effective = _audio_fit_plan(
+                        _audio_seconds(job.clip_path), _audio_seconds(job.audio_path)
+                    )
+                    fitted_audio = ffmpeg_ops.fit_audio(
+                        job.audio_path,
+                        effective,
+                        ws / LIPSYNC_DIR / f"audio_shot_{job.id}.wav",
+                        speedup=speedup,
+                    )
+                    # 2. 画面正向补到配音长度：节点只需按配音裁齐（mode=normal），
+                    #    不必用 pingpong 的"末段倒放"续接（那会让嘴型、肢体回退）
+                    padded = _extend_clip_to(
+                        job.clip_path,
+                        effective + _LIPSYNC_TAIL,
+                        ws / LIPSYNC_DIR / f"shot_{job.id}_pad.mp4",
+                    )
                     # LTX 片段天然无音轨，而 VHS_LoadVideo 的懒加载音频会在
                     # 服务端缓存扫描时提取音轨、无轨即崩——上传前补一条静音
-                    # 轨（视频流无损 copy），并沿用原文件名覆盖服务器上残留
-                    # 的无音轨旧副本
+                    # 轨（视频流无损 copy）
                     upload_clip = ffmpeg_ops.ensure_audio_track(
-                        job.clip_path,
-                        ws / LIPSYNC_DIR
-                        / f"{job.clip_path.stem}_audio{job.clip_path.suffix}",
+                        padded,
+                        ws / LIPSYNC_DIR / f"shot_{job.id}_audio{padded.suffix}",
                     )
                     clip_name = client.upload_file(
-                        upload_clip, name=job.clip_path.name
+                        upload_clip,
+                        name=f"p2v_shot_{job.id}{job.clip_path.suffix}",
                     )
-                    audio_name = client.upload_file(job.audio_path)
-                    adjust_mode = (
-                        "pingpong" if _audio_drives(job.clip_path, job.audio_path)
-                        else "normal"
-                    )
+                    audio_name = client.upload_file(fitted_audio)
+                    plans[job.id] = {
+                        "audio": f"{LIPSYNC_DIR}/{fitted_audio.name}",
+                        "speedup": round(speedup, 3),
+                        "audio_seconds": round(effective, 3),
+                    }
                     return client.filter_workflow_inputs(build_lipsync_workflow(
                         clip_name=clip_name,
                         audio_name=audio_name,
-                        mode=adjust_mode,
+                        mode="normal",
                         filename_prefix=f"prompt2vid_lipsync_{job.id}",
                     ))
 
@@ -669,13 +754,24 @@ def sync_lips(workspace: str | Path | None = None) -> dict:
                 if batch_ok:
                     logger.info("lipsync: 本批成功 %d / 失败 %d",
                                 len(batch_ok), len(errors))
+                # 无人脸镜头的失败重试也不会成功：归为 skipped，保留原片段
+                for shot_id in list(errors):
+                    if _is_no_face_error(errors[shot_id]):
+                        skipped[shot_id] = (
+                            "画面未检出人脸（空镜/动物/人物转身出画），保留原片段"
+                        )
+                        logger.info("lipsync: 分镜 %d 未检出人脸，跳过口型同步", shot_id)
+                        del errors[shot_id]
 
     entries: list[dict] = []
     for shot_id in sorted(set(ok) | set(errors) | set(skipped)):
         if shot_id in ok:
-            entries.append(_ok_entry(
+            entry = _ok_entry(
                 shot_id, "video", f"{LIPSYNC_DIR}/shot_{shot_id}.mp4", ok[shot_id]
-            ))
+            )
+            # 渲染阶段必须沿用这份配音（已提速/已定长），否则唇形对不上
+            entry.update(plans.get(shot_id, {}))
+            entries.append(entry)
         elif shot_id in errors:
             entries.append({
                 "id": shot_id,
@@ -795,15 +891,30 @@ def render_final(workspace: str | Path | None = None) -> dict:
         storyboard = {}
 
     # 口型同步产物优先（lipsync/manifest.json 里状态 ok 的镜头用
-    # lipsync/shot_<id>.mp4 替换原片段；文件缺失时回退原片段）
+    # lipsync/shot_<id>.mp4 替换原片段；文件缺失时回退原片段）。
+    # 同时取出该镜用过的配音（已提速/已定长）：必须沿用，否则渲染再提速
+    # 会让唇形与语音错位
+    lipsync_of: dict[int, Path] = {}
+    lipsync_audio: dict[int, tuple[Path, float, float]] = {}
     try:
-        lipsync_of = {
-            int(e.get("id", 0)): resolve_in_workspace(e.get("path", ""), ws)
-            for e in read_manifest(ws / LIPSYNC_DIR / "manifest.json")
-            if e.get("status") == "ok"
-        }
+        for entry in read_manifest(ws / LIPSYNC_DIR / "manifest.json"):
+            if entry.get("status") != "ok":
+                continue
+            shot_id = int(entry.get("id", 0))
+            lipsync_of[shot_id] = resolve_in_workspace(entry.get("path", ""), ws)
+            audio_rel = entry.get("audio")
+            if not audio_rel:
+                continue
+            wav = resolve_in_workspace(audio_rel, ws)
+            if wav.is_file():
+                lipsync_audio[shot_id] = (
+                    wav,
+                    float(entry.get("speedup", 1.0) or 1.0),
+                    float(entry.get("audio_seconds", 0.0) or 0.0),
+                )
     except (FileNotFoundError, ValueError):
         lipsync_of = {}
+        lipsync_audio = {}
 
     ok_clips = [c for c in clips if c.get("status") == "ok"]
     ok_clips.sort(key=lambda c: int(c.get("id", 0)))
@@ -867,8 +978,15 @@ def render_final(workspace: str | Path | None = None) -> dict:
                 speedup = 1.0
             else:
                 effective = max(duration, audio_duration / speedup)
+        # 该镜已做过口型同步：配音在同步阶段就按 _audio_fit_plan 定好了
+        # （提速 + 定长），这里直接沿用，绝不再改速度——否则唇形错位
+        synced = lipsync_audio.get(shot_id)
+        if synced is not None:
+            audio_path, speedup, synced_seconds = synced
+            audio_duration = synced_seconds
+            effective = max(duration, synced_seconds)
         extend = max(0.0, effective - duration)
-        if extend > 0.3:
+        if extend > 0.3 and synced is None:
             logger.info(
                 "render: 分镜 %d 配音 %.1fs 超过片段 %.1fs（旁白提速 %.2fx%s），"
                 "画面补长 %.1fs",
@@ -891,7 +1009,7 @@ def render_final(workspace: str | Path | None = None) -> dict:
 
         fitted = ffmpeg_ops.fit_audio(
             audio_path, effective, work_dir / f"audio_{shot_id}.wav",
-            speedup=speedup,
+            speedup=speedup if synced is None else 1.0,
         )
         fitted_audio.append(fitted)
 

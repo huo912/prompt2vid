@@ -87,6 +87,7 @@ class FakeComfyUIClient:
         fail_all: bool = False,
         fail_indices: set[int] | None = None,
         missing_nodes: set[str] | None = None,
+        error_messages: dict[int, str] | None = None,
     ):
         self.submitted: list[dict] = []
         self.uploads: list[Path] = []
@@ -94,9 +95,13 @@ class FakeComfyUIClient:
         self._fail_all = fail_all
         self._fail_indices = fail_indices or set()
         self._missing_nodes = missing_nodes or set()
+        self._error_messages = error_messages or {}
 
     def _fails(self, idx: int) -> bool:
         return self._fail_all or idx in self._fail_indices or idx < self._fail_first_n
+
+    def _error(self, idx: int) -> str:
+        return self._error_messages.get(idx, "ComfyUI exploded")
 
     def submit(self, workflow) -> str:
         pid = f"pid{len(self.submitted)}"
@@ -104,15 +109,17 @@ class FakeComfyUIClient:
         return pid
 
     def wait(self, prompt_id) -> dict:
-        if self._fails(int(prompt_id[3:])):
-            raise ComfyUITaskError("ComfyUI exploded")
+        idx = int(prompt_id[3:])
+        if self._fails(idx):
+            raise ComfyUITaskError(self._error(idx))
         return {"outputs": {"9": {"images": [{"filename": "out.png"}]}}}
 
     def wait_all(self, prompt_ids) -> dict:
         results = {}
         for pid in prompt_ids:
-            if self._fails(int(pid[3:])):
-                results[pid] = ComfyUITaskError("ComfyUI exploded")
+            idx = int(pid[3:])
+            if self._fails(idx):
+                results[pid] = ComfyUITaskError(self._error(idx))
             else:
                 results[pid] = {"outputs": {"9": {"images": [{"filename": "out.png"}]}}}
         return results
@@ -639,21 +646,38 @@ def _lipsync_workspace(tmp_path: Path, monkeypatch, with_audio: bool = True) -> 
     return ws
 
 
+def _fake_fit_audio(monkeypatch):
+    """配音定长/提速打桩：写占位文件，避免调真实 ffmpeg。"""
+    def fake_fit_audio(src, duration, dest, **kwargs):
+        dest = Path(dest)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(b"fake-fitted-audio")
+        return dest
+
+    monkeypatch.setattr(stages.ffmpeg_ops, "fit_audio", fake_fit_audio)
+
+
 def _fake_durations(monkeypatch, clip_seconds: float, audio_seconds: float):
-    """控制 _audio_drives 的时长探测（音视频按扩展名区分）。"""
+    """控制时长探测（音视频按扩展名区分），并打桩 fit_audio。
+
+    sync_lips 现在会先在本地把配音提速定长（与渲染同一套算法），
+    测试里没有真实音轨，写个占位文件即可。
+    """
     def fake_probe(path):
         path = Path(path)
-        seconds = audio_seconds if path.suffix == ".mp3" else clip_seconds
+        seconds = audio_seconds if path.suffix in (".mp3", ".wav") else clip_seconds
         return {"path": str(path), "duration_seconds": seconds,
                 "width": 512, "height": 768, "fps": 25.0, "has_audio": True}
 
     monkeypatch.setattr(stages.ffmpeg_ops, "probe_file", fake_probe)
+    _fake_fit_audio(monkeypatch)
 
 
 def test_sync_lips_submits_latentsync_workflows(tmp_path, monkeypatch):
     ws = _lipsync_workspace(tmp_path, monkeypatch)
     fake = _use_fake_client(monkeypatch)
-    # 配音 5s > 片段 2s → pingpong（补帧到配音长度，旁白零截断）
+    # 配音 5s > 片段 2s：本地先按 1.2x 提速定长（4.17s），画面正向补到
+    # 4.32s，再交给节点按配音裁齐（mode=normal，不再用倒放补帧）
     _fake_durations(monkeypatch, clip_seconds=2.0, audio_seconds=5.0)
 
     result = stages.sync_lips()
@@ -665,17 +689,27 @@ def test_sync_lips_submits_latentsync_workflows(tmp_path, monkeypatch):
     assert len(fake.submitted) == 2
     for workflow in fake.submitted:
         assert workflow["latentsync"]["class_type"] == "LatentSyncNode"
-        assert workflow["adjust"]["inputs"]["mode"] == "pingpong"
+        assert workflow["adjust"]["inputs"]["mode"] == "normal"
+        assert workflow["adjust"]["inputs"]["silent_padding_sec"] <= 0.15
         assert workflow["save"]["class_type"] == "VHS_VideoCombine"
-    # 片段与配音都上传；产物落盘并写清单
+    # 上传的是"补长后的画面 + 已定长的配音"（补帧失败时退回原片段）
     assert {p.name for p in fake.uploads} == {
-        "shot_1.webm", "shot_2.webm", "shot_1.mp3", "shot_2.mp3",
+        "shot_1.webm", "shot_2.webm",
+        "audio_shot_1.wav", "audio_shot_2.wav",
+    }
+    assert {w["load_video"]["inputs"]["video"] for w in fake.submitted} == {
+        "p2v_shot_1.webm", "p2v_shot_2.webm",
     }
     for shot_id in (1, 2):
         assert (ws / "lipsync" / f"shot_{shot_id}.mp4").is_file()
     manifest = json.loads((ws / "lipsync" / "manifest.json").read_text(encoding="utf-8"))
     assert [s["id"] for s in manifest["shots"]] == [1, 2]
     assert all(s["status"] == "ok" for s in manifest["shots"])
+    # 渲染阶段要沿用这份配音：路径、提速倍数、定长秒数都得记下来
+    first = manifest["shots"][0]
+    assert first["audio"] == "lipsync/audio_shot_1.wav"
+    assert first["speedup"] == 1.2
+    assert abs(first["audio_seconds"] - 5.0 / 1.2) < 0.01
 
 
 def test_sync_lips_muxes_silent_track_for_audio_less_clips(tmp_path, monkeypatch):
@@ -701,17 +735,22 @@ def test_sync_lips_muxes_silent_track_for_audio_less_clips(tmp_path, monkeypatch
         return ""
 
     monkeypatch.setattr(stages.ffmpeg_ops, "run_ffmpeg", fake_run_ffmpeg)
+    _fake_fit_audio(monkeypatch)
 
     result = stages.sync_lips()
 
     assert result["succeeded"] == 2
-    assert [p.name for p in muxed] == ["shot_1_audio.webm", "shot_2_audio.webm"]
-    # 上传的是补轨副本，但沿用原文件名——覆盖服务器上残留的旧副本
+    assert {p.name for p in muxed} == {
+        "shot_1_pad.mp4", "shot_2_pad.mp4",
+        "shot_1_audio.mp4", "shot_2_audio.mp4",
+    }
+    # 上传补轨后的副本 + 已定长的配音
     assert {p.name for p in fake.uploads} == {
-        "shot_1_audio.webm", "shot_2_audio.webm", "shot_1.mp3", "shot_2.mp3",
+        "shot_1_audio.mp4", "shot_2_audio.mp4",
+        "audio_shot_1.wav", "audio_shot_2.wav",
     }
     assert {w["load_video"]["inputs"]["video"] for w in fake.submitted} == {
-        "shot_1.webm", "shot_2.webm",
+        "p2v_shot_1.webm", "p2v_shot_2.webm",
     }
 
 
@@ -727,8 +766,8 @@ def test_sync_lips_normal_mode_when_clip_longer(tmp_path, monkeypatch):
         assert workflow["adjust"]["inputs"]["mode"] == "normal"
 
 
-def test_sync_lips_probe_failure_defaults_to_pingpong(tmp_path, monkeypatch):
-    """探测失败按 pingpong 处理：音频只会被静音补齐、绝不被裁剪。"""
+def test_sync_lips_probe_failure_keeps_clip(tmp_path, monkeypatch):
+    """探测失败时不做任何补帧，仍走 normal——宁可口型稍短也不倒放。"""
     _lipsync_workspace(tmp_path, monkeypatch)
     fake = _use_fake_client(monkeypatch)
 
@@ -736,10 +775,11 @@ def test_sync_lips_probe_failure_defaults_to_pingpong(tmp_path, monkeypatch):
         raise RuntimeError("probe failed")
 
     monkeypatch.setattr(stages.ffmpeg_ops, "probe_file", failing_probe)
+    _fake_fit_audio(monkeypatch)
     stages.sync_lips()
 
     for workflow in fake.submitted:
-        assert workflow["adjust"]["inputs"]["mode"] == "pingpong"
+        assert workflow["adjust"]["inputs"]["mode"] == "normal"
 
 
 def test_sync_lips_failed_shot_keeps_original(tmp_path, monkeypatch):
@@ -758,6 +798,31 @@ def test_sync_lips_failed_shot_keeps_original(tmp_path, monkeypatch):
     assert "error" not in result
     assert not (ws / "lipsync" / "shot_1.mp4").exists()
     assert (ws / "lipsync" / "shot_2.mp4").is_file()
+
+
+def test_sync_lips_no_face_marked_skipped(tmp_path, monkeypatch):
+    """未检出人脸（空镜/动物/脸出画）是内容限制：记 skipped 而非 failed。"""
+    ws = _lipsync_workspace(tmp_path, monkeypatch)
+    _fake_durations(monkeypatch, clip_seconds=2.0, audio_seconds=5.0)
+    # 镜 1 报 Face not detected，镜 2 仍是真正的故障
+    _use_fake_client(monkeypatch, fail_indices={0, 1}, error_messages={
+        0: "ComfyUI 执行失败: RuntimeError: Face not detected",
+    })
+
+    result = stages.sync_lips()
+
+    assert result["succeeded"] == 0
+    assert result["skipped"] == 1
+    assert result["failed"] == 1
+    assert result["failed_shots"][0]["id"] == 2
+    manifest = json.loads(
+        (ws / "lipsync" / "manifest.json").read_text(encoding="utf-8")
+    )
+    by_id = {s["id"]: s for s in manifest["shots"]}
+    assert by_id[1]["status"] == "skipped"
+    assert "人脸" in by_id[1]["reason"]
+    assert by_id[2]["status"] == "failed"
+    assert by_id[2]["fallback"] == "clips/shot_2.webm"
 
 
 def test_sync_lips_missing_nodes_auto_skips(tmp_path, monkeypatch):
@@ -897,6 +962,81 @@ def test_render_final_and_quality_checks(tmp_path, monkeypatch):
     assert {"final_video_exists", "duration_match", "resolution_ok",
             "audio_track_present", "assets_complete"} <= names
     assert (ws / "report" / "quality_report.json").is_file()
+
+
+@pytest.mark.skipif(not HAS_FFMPEG, reason="本机未安装 ffmpeg/ffprobe")
+def test_render_final_reuses_lipsync_audio(tmp_path, monkeypatch):
+    """已做过口型同步的镜头：渲染沿用同步阶段的配音，不再提速/补长。
+
+    否则画面按原速说完一句话、音频却被快放一遍，唇形必然错位。
+    """
+    ws = _setup_workspace(tmp_path, monkeypatch)
+
+    for shot_id in (1, 2):
+        clip = ws / "clips" / f"shot_{shot_id}.webm"
+        clip.parent.mkdir(parents=True, exist_ok=True)
+        subprocess.run(
+            [FFMPEG, "-hide_banner", "-loglevel", "error", "-y",
+             "-f", "lavfi", "-i", "testsrc=size=512x768:rate=25",
+             "-t", "1", "-c:v", "libvpx-vp9", str(clip)],
+            check=True,
+        )
+        # 原始配音 2.4s 远长于 1s 片段：未同步时渲染会提速 1.2x
+        audio = ws / "audio" / f"shot_{shot_id}.mp3"
+        audio.parent.mkdir(parents=True, exist_ok=True)
+        subprocess.run(
+            [FFMPEG, "-hide_banner", "-loglevel", "error", "-y",
+             "-f", "lavfi", "-i", "sine=frequency=440",
+             "-t", "2.4", str(audio)],
+            check=True,
+        )
+        # 同步阶段产出的"已定长"配音 1.9s + 成片片段
+        fitted = ws / "lipsync" / f"audio_shot_{shot_id}.wav"
+        fitted.parent.mkdir(parents=True, exist_ok=True)
+        subprocess.run(
+            [FFMPEG, "-hide_banner", "-loglevel", "error", "-y",
+             "-f", "lavfi", "-i", "sine=frequency=440",
+             "-t", "1.9", str(fitted)],
+            check=True,
+        )
+        synced = ws / "lipsync" / f"shot_{shot_id}.mp4"
+        subprocess.run(
+            [FFMPEG, "-hide_banner", "-loglevel", "error", "-y",
+             "-f", "lavfi", "-i", "testsrc=size=512x768:rate=25",
+             "-t", "1.9", "-c:v", "libx264", "-pix_fmt", "yuv420p", str(synced)],
+            check=True,
+        )
+
+    for rel, key, ext in (
+        ("clips", "video", "webm"), ("audio", "audio", "mp3"),
+    ):
+        folder = ws / rel
+        (folder / "manifest.json").write_text(
+            json.dumps({"shots": [
+                {"id": i, key: f"{rel}/shot_{i}.{ext}", "status": "ok",
+                 "path": str(folder / f"shot_{i}.{ext}")}
+                for i in (1, 2)
+            ]}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+    (ws / "lipsync" / "manifest.json").write_text(
+        json.dumps({"shots": [
+            {"id": i, "status": "ok", "path": f"lipsync/shot_{i}.mp4",
+             "audio": f"lipsync/audio_shot_{i}.wav", "speedup": 1.2,
+             "audio_seconds": 1.9}
+            for i in (1, 2)
+        ]}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    render = stages.render_final()
+
+    assert "error" not in render, render
+    # 每镜 1.9s → 成片约 3.8s；若渲染重新提速/补长会明显偏离
+    assert 3.5 <= render["duration_seconds"] <= 4.2, render["duration_seconds"]
+    assert render["lipsync"]["shots"] == 2
+    # 沿用同步配音时不再触发"配音超长"重算
+    assert render["audio_overruns"] == []
 
 
 @pytest.mark.skipif(not HAS_FFMPEG, reason="本机未安装 ffmpeg/ffprobe")
