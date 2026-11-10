@@ -432,10 +432,12 @@ def test_generate_clips_batch_from_frames_manifest(tmp_path, monkeypatch):
     # 整批一次性提交
     assert len(fake.submitted) == 2
     first_wf = fake.submitted[0]
-    # prompt = image_prompt + motion_prompt + 肢体稳定提示
+    # 默认（motion 模式）只喂运动描述 + 首帧锚点：首帧图已经固定了长相/
+    # 构图，再喂 image_prompt 会让 LTX 按文字重画场景（硬切/假字幕）
     text = first_wf["6"]["inputs"]["text"]
-    assert "autumn park, golden leaves" in text
+    assert "autumn park, golden leaves" not in text
     assert "slow zoom in" in text
+    assert "single continuous shot" in text
     assert "consistent anatomy" in text
     # 视频画幅跟首帧画幅一致（回归：固定 512x768 会把 768x1344 首帧裁变形）
     width = first_wf["95"]["inputs"]["width"]

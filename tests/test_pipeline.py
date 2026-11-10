@@ -146,8 +146,8 @@ def test_run_media_stages_stops_on_error(fake_stages, monkeypatch):
 
     monkeypatch.setitem(pipeline._STAGE_FUNCS, "clips", failing_clips)
     last = pipeline.run_media_stages("frames")
-    # frames 执行、clips 报错后停止，voiceovers/render/quality 不执行
-    assert fake_stages == ["frames", "clips"]
+    # frames → voiceovers 正常，clips 报错后停止，lipsync/render/quality 不执行
+    assert fake_stages == ["frames", "voiceovers", "clips"]
     assert last["error"] == "boom"
 
 
@@ -159,8 +159,10 @@ def test_run_media_stages_render_error_still_quality(fake_stages, monkeypatch):
     monkeypatch.setitem(pipeline._STAGE_FUNCS, "render", failing_render)
     last = pipeline.run_media_stages("voiceovers")
     # 渲染失败后质检仍然执行（如实记录失败原因）；
-    # 从 voiceovers 起跑会经过 lipsync（配音之后、渲染之前）
-    assert fake_stages == ["voiceovers", "lipsync", "render", "quality"]
+    # 从 voiceovers 起跑会依次经过 clips/lipsync（配音之后、渲染之前）
+    assert fake_stages == [
+        "voiceovers", "clips", "lipsync", "render", "quality",
+    ]
     assert last["stage"] == "quality"
 
 

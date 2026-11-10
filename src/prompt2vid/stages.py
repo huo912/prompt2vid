@@ -43,6 +43,7 @@ from .comfyui_client import (
     run_text_to_image,
 )
 from .storyboard import (
+    SPEECH_CHARS_PER_SECOND,
     Character,
     Line,
     Shot,
@@ -86,13 +87,36 @@ DEFAULT_LTX_PROMPT_SUFFIX = (
 )
 
 
+# LTX 图生视频的正向提示词只描述「第一帧怎么动」。把文生图 prompt 一起
+# 塞进去时，模型会按文字重新"画"一遍场景而不是动起来——实测把
+# "seen from behind at the top edge of the frame / a white sedan on the
+# road" 这类构图词喂进去，玉帝镜头 0.12s 就硬切成了街景（丢脸→口型同步
+# 整镜跳过），另一镜把人物拉成了满屏金字的假海报。
+LTX_PROMPT_ANCHOR = (
+    "single continuous shot, the same character and the same background as "
+    "the first frame, no scene change, no cut, no new subject enters"
+)
+
+
 def _ltx_prompt(shot: Shot) -> str:
-    """构造图生视频正向提示词：场景 + 运动 + 肢体稳定约束。"""
-    parts = [
-        part.strip(" ,")
-        for part in (shot.image_prompt, shot.motion_prompt)
-        if part and part.strip()
-    ]
+    """构造图生视频正向提示词。
+
+    默认（COMFYUI_LTX_PROMPT_MODE=motion）只喂运动描述 + 首帧锚点：
+    首帧图已经固定了长相/服装/构图，文字再说一遍只会和画面抢控制权。
+    设成 full 时退回旧行为（image_prompt + motion_prompt），仅在运动
+    prompt 信息不足时使用。
+    """
+    mode = env_str("COMFYUI_LTX_PROMPT_MODE", "motion").lower()
+    motion = (shot.motion_prompt or "").strip(" ,")
+    if mode == "full":
+        parts = [
+            part.strip(" ,")
+            for part in (shot.image_prompt, shot.motion_prompt)
+            if part and part.strip()
+        ]
+    else:
+        anchor = env_str("COMFYUI_LTX_PROMPT_ANCHOR", LTX_PROMPT_ANCHOR)
+        parts = [part for part in (motion, anchor) if part]
     text = ", ".join(parts)
     suffix = env_str("COMFYUI_LTX_PROMPT_SUFFIX", DEFAULT_LTX_PROMPT_SUFFIX)
     if suffix and suffix.lower() not in text.lower():
@@ -109,8 +133,11 @@ def frames_for_duration(seconds: float) -> int:
     if length > max_frames:
         logger.warning(
             "video: 分镜时长 %.1fs 超出 LTX 单镜上限 %.1fs（COMFYUI_LTX_MAX_FRAMES=%d），"
-            "实际只生成 %.1fs，多出的配音只能靠降速/补帧吸收",
+            "实际只生成 %.1fs，多出的配音只能靠降速/补帧吸收"
+            "（画面会明显变慢甚至定格——建议把这句台词精简到 %.1f 字以内，"
+            "或拆成两个分镜）",
             seconds, (max_frames - 1) / fps, max_frames, (max_frames - 1) / fps,
+            (max_frames - 1) / fps * SPEECH_CHARS_PER_SECOND,
         )
         length = max_frames
     return max(MIN_FRAMES, length)
@@ -355,8 +382,9 @@ def generate_frames(workspace: str | Path | None = None) -> dict:
 def generate_clips(workspace: str | Path | None = None) -> dict:
     """阶段 2：把每个首帧图转为视频片段（ComfyUI LTX-Video 图生视频）。
 
-    首帧图先逐个上传，然后整批工作流一次性提交给 ComfyUI，统一收集后
-    对失败分镜重试。
+    每镜的帧数由该镜配音的真实时长决定（配音阶段排在生视频之前），
+    配音缺失时才退回分镜估算时长；随后首帧图逐个上传，整批工作流
+    一次性提交给 ComfyUI，统一收集后对失败分镜重试。
     """
     ws = workspace_root(workspace)
     try:
@@ -384,6 +412,21 @@ def generate_clips(workspace: str | Path | None = None) -> dict:
             frame_w, frame_h = dims
             break
 
+    # 配音若已生成（pipeline 顺序：frames → voiceovers → clips），各镜画面
+    # 时长按真实配音定；没配音时退回分镜估算时长
+    audio_of = _audio_seconds_by_shot(ws)
+
+    def seconds_of(shot: Shot) -> float:
+        return _clip_seconds(shot, audio_of.get(shot.id, 0.0))
+
+    grown = [
+        f"shot_{sid}:{seconds:.1f}s"
+        for sid, seconds in sorted(audio_of.items())
+        if sid in storyboard and seconds > storyboard[sid].duration_seconds
+    ]
+    if grown:
+        logger.info("clips: 按配音时长定帧数（分镜估时偏短）: %s", ", ".join(grown))
+
     def dest_of(shot: Shot) -> Path:
         return ws / CLIPS_DIR / f"shot_{shot.id}.webm"
 
@@ -398,7 +441,7 @@ def generate_clips(workspace: str | Path | None = None) -> dict:
             continue  # 首帧图缺失的分镜直接不进清单
         if dest.is_file() and dest.stat().st_size > 0:
             ok[shot.id] = dest  # 断点续跑
-            lengths[shot.id] = frames_for_duration(shot.duration_seconds)
+            lengths[shot.id] = frames_for_duration(seconds_of(shot))
         else:
             pending.append(shot)
 
@@ -416,7 +459,7 @@ def generate_clips(workspace: str | Path | None = None) -> dict:
                 def make_workflow(shot: Shot) -> dict:
                     # 上传在提交前串行完成；失败会作为该镜本轮错误进入重试
                     uploaded = client.upload_image(image_of[shot.id])
-                    length = frames_for_duration(shot.duration_seconds)
+                    length = frames_for_duration(seconds_of(shot))
                     lengths[shot.id] = length
                     # 逐镜按首帧真实画幅换算 LTX 画布（32 倍数 + 显存预算），
                     # 保证首帧不被 LTXVImgToVideo 裁切/挤压
@@ -570,6 +613,41 @@ def _audio_seconds(path: Path) -> float:
         return float(ffmpeg_ops.probe_file(path)["duration_seconds"])
     except (RuntimeError, FileNotFoundError):
         return 0.0
+
+
+# 画面比配音多留的一点点余量：口型同步/渲染都按配音裁齐，多几帧不会
+# 让旁白被截，却能让「画面比配音短」这条降速/定格路径彻底不走
+CLIP_TAIL_SECONDS = 0.4
+
+
+def _audio_seconds_by_shot(ws: Path) -> dict[int, float]:
+    """每镜配音的真实时长（audio/manifest.json，缺失/失败返回空表）。"""
+    try:
+        entries = read_manifest(ws / AUDIO_DIR / "manifest.json")
+    except (FileNotFoundError, ValueError):
+        return {}
+    seconds: dict[int, float] = {}
+    for entry in entries:
+        if entry.get("status") != "ok":
+            continue
+        path = resolve_in_workspace(entry.get("path", entry.get("audio", "")), ws)
+        value = _audio_seconds(path)
+        if value > 0:
+            seconds[int(entry.get("id", 0))] = value
+    return seconds
+
+
+def _clip_seconds(shot: Shot, audio_seconds: float) -> float:
+    """该镜要生成多少秒画面：跟着真实配音走，而不是分镜里的估算时长。
+
+    分镜估时（按字数/语速推）经常比 TTS 实际念出来的短，画面不够时
+    只能靠降速 + 定格末帧垫长——成片就是「一张图在念台词」。配音已经
+    先跑过时，直接按配音时长出片，画面全程都在动。
+    """
+    declared = shot.duration_seconds
+    if audio_seconds <= 0:
+        return declared
+    return max(declared, audio_seconds + CLIP_TAIL_SECONDS)
 
 
 def _extend_clip_to(clip_path: Path, seconds: float, dest: Path) -> Path:

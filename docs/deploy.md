@@ -18,14 +18,14 @@
 
 以 ComfyUI 安装目录为根（如 `D:\ComfyUI_windows_portable\ComfyUI\`）：
 
-| #         | 文件名（必须一字不差）                        | 大小   | 放到                    | 用途                                                          | `.env` 对应变量（默认值=文件名，不改即可） |
-| --------- | --------------------------------------------- | ------ | ----------------------- | ------------------------------------------------------------- | ------------------------------------------ |
-| 1         | `sd_xl_base_1.0.safetensors`                  | ~6.9GB | `models/checkpoints/`   | 分镜首帧文生图 + 角色定妆照                                   | `COMFYUI_T2I_CHECKPOINT`                   |
-| 2         | `ltx-video-2b-v0.9.5.safetensors`             | ~2.0GB | `models/checkpoints/`   | 首帧转视频片段                                                | `COMFYUI_LTX_CHECKPOINT`                   |
-| 3         | `t5xxl_fp8_e4m3fn.safetensors`                | ~4.9GB | `models/text_encoders/` | 视频阶段的文字编码器（必须 fp8 版，fp16 版会 OOM）            | `COMFYUI_T5`                               |
-| 4（可选） | `ip-adapter-plus-face_sdxl_vit-h.safetensors` | ~0.5GB | `models/ipadapter/`     | 角色一致性：参考注入适配器                                    | 无需配置（节点按预设名自动加载）           |
-| 5（可选） | `CLIP-ViT-H-14-laion2B-s32B-b79K.safetensors` | ~2.5GB | `models/clip_vision/`   | 角色一致性：参考图的图像编码器                                | 无需配置                                   |
-| 6（可选） | `anime.safetensors`                           | ~48MB  | `models/loras/`         | 全片动漫风格（文生图 LoRA，各档位推荐见 §九与 `.env.<档位>`） | `COMFYUI_T2I_LORA`                         |
+| #         | 文件名（必须一字不差）                        | 大小   | 放到                    | 用途                                                                       | `.env` 对应变量（默认值=文件名，不改即可） |
+| --------- | --------------------------------------------- | ------ | ----------------------- | -------------------------------------------------------------------------- | ------------------------------------------ |
+| 1         | `sd_xl_base_1.0.safetensors`                  | ~6.9GB | `models/checkpoints/`   | 分镜首帧文生图 + 角色定妆照                                                | `COMFYUI_T2I_CHECKPOINT`                   |
+| 2         | `ltx-video-2b-v0.9.5.safetensors`             | ~2.0GB | `models/checkpoints/`   | 首帧转视频片段                                                             | `COMFYUI_LTX_CHECKPOINT`                   |
+| 3         | `t5xxl_fp8_e4m3fn.safetensors`                | ~4.9GB | `models/text_encoders/` | 视频阶段的文字编码器（必须 fp8 版，fp16 版会 OOM；4090 高档例外，见 §7.7） | `COMFYUI_T5`                               |
+| 4（可选） | `ip-adapter-plus-face_sdxl_vit-h.safetensors` | ~0.5GB | `models/ipadapter/`     | 角色一致性：参考注入适配器                                                 | 无需配置（节点按预设名自动加载）           |
+| 5（可选） | `CLIP-ViT-H-14-laion2B-s32B-b79K.safetensors` | ~2.5GB | `models/clip_vision/`   | 角色一致性：参考图的图像编码器                                             | 无需配置                                   |
+| 6（可选） | `anime.safetensors`                           | ~48MB  | `models/loras/`         | 全片动漫风格（文生图 LoRA，各档位推荐见 §九与 `.env.<档位>`）              | `COMFYUI_T2I_LORA`                         |
 
 前 3 个必装（约 13.8GB）；4、5 只在想开启角色一致性时才装（约 3GB）；
 6 只在固定动漫风格时才装（48MB，文件缺失会自动降级为纯提示词风格约束）。
@@ -252,6 +252,48 @@ prompt2vid --check-only --env-file 5090   # 本地执行，会真实连云机验
   ```
 - **本地 Windows 下载**：同样命令在 PowerShell 里跑，先执行
   `$env:HF_ENDPOINT = "https://hf-mirror.com"`；
+
+### 7.7 4090 档专用：T5 换 fp16 + 文件存储软链
+
+标准档 T5 用 fp8（4.9GB）。4090 档可改用质量更好的 **fp16**
+（`t5xxl_fp16.safetensors`，9.79GB）：数据盘吃紧时把它放 AutoDL
+**文件存储**（`/autodl-fs/data`，关机/换实例都保留），再软链进 ComfyUI，
+模型本体不占数据盘。
+
+```bash
+FS=/autodl-fs/data
+COMFY=/root/autodl-tmp/ComfyUI          # ← 换成你的 ComfyUI 实际路径
+export HF_ENDPOINT=https://hf-mirror.com HF_HUB_DISABLE_XET=1
+
+# 1) 下到文件存储（不是 ComfyUI 目录）
+mkdir -p "$FS/models/text_encoders" "$COMFY/models/text_encoders"
+hf download comfyanonymous/flux_text_encoders t5xxl_fp16.safetensors \
+  --local-dir "$FS/models/text_encoders"
+
+# 2) 软链到 ComfyUI 的正确位置（text_encoders/，不是 checkpoints/）
+ln -sfn "$FS/models/text_encoders/t5xxl_fp16.safetensors" \
+        "$COMFY/models/text_encoders/t5xxl_fp16.safetensors"
+readlink -f "$COMFY/models/text_encoders/t5xxl_fp16.safetensors"   # 应指回 /autodl-fs
+
+# 3) 重启 ComfyUI（目录只在启动时扫描）+ 验证
+pkill -f "main.py"; sleep 2; cd "$COMFY"
+nohup python main.py --listen 127.0.0.1 --port 8188 > comfyui.log 2>&1 &
+sleep 20
+curl -s http://127.0.0.1:8188/object_info/CLIPLoader | grep -o '"t5xxl[^"]*"'
+# 期望输出 t5xxl_fp16.safetensors
+```
+
+`.env.4090` 已按本档配好：
+
+```ini
+COMFYUI_T5=t5xxl_fp16.safetensors
+COMFYUI_T5_DEVICE=cpu     # 9.8GB 权重放 GPU 会和 13B 抢显存，必须留 CPU
+```
+
+> **仅 4090 档适用**：fp16 只在 24GB+ 且 `COMFYUI_T5_DEVICE=cpu` 时安全。
+> 8GB / 12GB 档（`.env` / `.env.4060`）继续用 fp8，换 fp16 必 OOM。
+> 文件名改了但预检仍报缺失时，先 `readlink -f` 确认软链没断、再确认
+> ComfyUI 是否已重启。
 
 ## 八、AutoDL 租用 5090：从零安装 ComfyUI（含无卡模式，保姆级）
 
@@ -594,11 +636,6 @@ git clone https://github.com/ShmuelRonen/ComfyUI-LatentSyncWrapper.git
 pip install -r ComfyUI-LatentSyncWrapper\requirements.txt # 首次运行自动下模型（约 7GB）
 git clone https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite.git # 如未装
 
-cd /root/autodl-tmp/ComfyUI
-nohup python main.py --listen 127.0.0.1 --port 8188 > comfyui.log 2>&1 &
-tail -f comfyui.log
-
-ssh -N -L 8188:127.0.0.1:8188 -p 28837 root@connect.westb.seetacloud.com
 # 密码 / 端口见 AutoDL 控制台「自定义服务」，勿写进仓库（或改用免密登录）
 
 source .venv/bin/activate
@@ -610,6 +647,11 @@ prompt2vid "一只戴着安全帽、叼着施工图纸的哈士奇，站在沈�
 export HF_ENDPOINT=https://hf-mirror.com
 export HF_HUB_DISABLE_XET=1
 hf download ByteDance/LatentSync-1.6 --local-dir /root/autodl-tmp/LatentSync-1.6
+
+cd /root/autodl-tmp/ComfyUI
+nohup python main.py --listen 127.0.0.1 --port 8188 > comfyui.log 2>&1 & tail -f comfyui.log
+
+ssh -N -L 8188:127.0.0.1:8188 -p 52252 root@connect.westb.seetacloud.com
 
 prompt2vid-server --env-file 4090-low
 

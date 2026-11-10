@@ -38,8 +38,10 @@ TASK_ORDER: list[str] = [
     "write_script",
     "plan_storyboard",
     "generate_images",
-    "generate_videos",
+    # 配音排在生视频之前：每个镜头的画面时长要按真实配音长度生成，
+    # 否则只能靠降速/定格把画面垫长（成片出现"一张图在念台词"）
     "generate_voiceover",
+    "generate_videos",
     "edit_video",
     "inspect_quality",
     "publish_douyin",

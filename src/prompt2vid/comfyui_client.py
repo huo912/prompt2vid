@@ -84,7 +84,15 @@ DEFAULT_LTX_NEGATIVE = (
     "low quality, worst quality, deformed, distorted, disfigured, "
     "motion smear, motion artifacts, fused fingers, extra fingers, "
     "missing fingers, extra limbs, malformed limbs, bad anatomy, "
-    "bad hands, weird hand, twisted body, body morphing, ugly"
+    "bad hands, weird hand, twisted body, body morphing, ugly, "
+    # LTX-13B 的训练集里混了大量带硬字幕的短视频：不压就会自己"烧"出
+    # 假中文标题、台标、角标，并把镜头拉成一张海报（实测成片里出现
+    # 满屏金字假标题、influencer 水印）。台词字幕由渲染阶段烧，不靠模型。
+    "subtitles, captions, on-screen text, chinese text, letters, "
+    "watermark, logo, channel bug, sticker, poster layout, "
+    # 首帧之外强行换景/切镜：图生视频应只有一个连续镜头
+    "scene change, camera cut, jump cut, montage, split screen, "
+    "stock footage"
 )
 
 # 角色一致性（IPAdapter 参考图注入）：需在 ComfyUI 安装

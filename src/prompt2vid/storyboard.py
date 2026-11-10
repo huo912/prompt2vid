@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -50,6 +51,77 @@ SPEECH_TAIL_SECONDS = 0.4
 
 # 旁白行的发言人 id（角色 id 从 1 开始，0 专门表示旁白/画外音）
 NARRATOR_ID = 0
+
+# 有台词的镜头必须能看见嘴。LatentSync 逐帧检测正脸，任何一帧检不到就
+# 整镜跳过口型同步——成片里就成了"人没开口却在说话"。分镜师为了构图
+# 常写"背面/出画/半张脸/虚化"，这里在解析阶段直接纠回正脸中近景。
+_NO_FACE_FRAMINGS = (
+    "seen from behind",
+    "from behind",
+    "back view",
+    "back to camera",
+    "back of his head",
+    "back of her head",
+    "over-the-shoulder",
+    "over the shoulder",
+    "at the very top edge of the frame",
+    "at the top edge of the frame",
+    "top edge of the frame",
+    "at the very top of the frame",
+    "at the top of the frame",
+    "top of the frame",
+    "bottom edge of the frame",
+    "at the bottom of the frame",
+    "bottom of the frame",
+    "edge of the frame",
+    "upper corner of the frame",
+    "off-screen",
+    "off screen",
+    "half his face",
+    "half her face",
+    "half of his face",
+    "half of her face",
+    "only his shoulder",
+    "only her shoulder",
+    "only a shoulder",
+    "only his back",
+    "partially out of frame",
+    "out of frame",
+    "in soft focus",
+    "silhouette",
+    "silhouetted",
+)
+
+_FACE_VISIBLE_SUFFIX = (
+    "front-facing medium close-up, the character's whole face clearly visible "
+    "and in sharp focus, mouth and jaw unobstructed, eyes toward camera"
+)
+
+# 会让主体变小/把背景整个换掉的运镜：台词镜里一律改成慢推近。
+# "slow zoom out" 喂给 LTX 会真的拉远——主体从半身变成全身、脸小到
+# LatentSync 检不到（整镜跳过口型），而且拉远露出的背景是模型现编的
+# （实测玉帝从红墙半身镜变成金云全身镜，同一镜内换了景别和背景）。
+_SHRINK_MOVES = (
+    "slow zoom out",
+    "slight zoom out",
+    "zoom out",
+    "zoom back",
+    "dolly out",
+    "dolly back",
+    "pull back",
+    "pull out",
+    "crane out",
+    "crane up",
+    "tilt up",
+    "boom out",
+)
+# 拉远改用推近：主体只会变大，脸和背景都是首帧里已有的内容
+_CAMERA_LOCK_MOTION = "slow zoom in, camera stays on the character"
+
+# motion_prompt 里出现这些词才算写了"在说话"；否则 LatentSync 没有可
+# 对齐的口部动作，只能生成一张不动的脸
+_SPEAKING_CUES = ("lips", "speak", "talk", "mouth", "jaw")
+_SPEAKING_MOTION = "the character speaks, lips and jaw moving naturally"
 # 发言人写这些字样时按旁白处理
 NARRATOR_ALIASES = {
     "", "旁白", "旁白/画外音", "画外音", "解说", "叙述",
@@ -328,6 +400,88 @@ def _normalize_dialogue(
     return lines
 
 
+def _strip_no_face(text: str, hits: list[str]) -> str:
+    """删掉 text 里的挡脸短语，并清理残留的重复空格/悬空标点。
+
+    短语后面紧跟的 " and <补语>" 一并删掉：分镜师常写
+    "only his shoulder and white beard visible above a cloud edge"，
+    只删前半句会留下一句没有主语的残句（还会被模型当成新主体画出来）。
+    """
+    cleaned = text
+    for phrase in hits:
+        cleaned = re.sub(
+            re.escape(phrase) + r"(?:\s+and\s+[^,.;]*)?",
+            " ",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
+    cleaned = re.sub(r"\s{2,}", " ", cleaned)
+    cleaned = re.sub(r"\s+([,.;])", r"\1", cleaned)
+    cleaned = re.sub(r",(\s*,)+", ",", cleaned)
+    cleaned = re.sub(r",\s*(?=[.;])", "", cleaned)
+    # 删词后剩下的悬空分词（"posture, appearing, visible above ..."）
+    cleaned = re.sub(r",\s*(?:appearing|standing|seen)\b\s*,", ",", cleaned)
+    return cleaned.strip(" ,")
+
+
+# 首帧构图句（"Vertical over-the-shoulder high angle shot."）在挡脸纠偏后
+# 已经由 _FACE_VISIBLE_SUFFIX 接管，留着会和"正脸中近景"互相打架
+_FRAMING_SENTENCE = re.compile(r"^[^.]{0,60}\bshot\b[^.]*\.\s*", re.IGNORECASE)
+
+
+def _make_face_visible(
+    shot_id: int, image_prompt: str, motion_prompt: str, fixes: list[str]
+) -> tuple[str, str]:
+    """有台词的镜头：剥掉遮挡面部的构图词，并补一句口部动作。
+
+    只对"角色真的要开口"的镜头生效——空镜/动物/纯旁白镜不动，避免把
+    有意的背影设计改掉。image_prompt 与 motion_prompt 都要清：后者常写着
+    "sighs at the top of the frame"，只清前者的话 LTX 还是会把脸推向边缘。
+    """
+    hits = [phrase for phrase in _NO_FACE_FRAMINGS if phrase in image_prompt.lower()]
+    if hits:
+        cleaned = _FRAMING_SENTENCE.sub("", _strip_no_face(image_prompt, hits))
+        image_prompt = (
+            f"{cleaned}, {_FACE_VISIBLE_SUFFIX}" if cleaned else _FACE_VISIBLE_SUFFIX
+        )
+        msg = (
+            f"分镜 {shot_id} 有台词但构图挡脸（{', '.join(hits)}），已改为"
+            f"正脸中近景——脸不在画面里，口型同步会整镜跳过"
+        )
+        fixes.append(msg)
+        logger.warning("%s", msg)
+
+    motion_hits = [
+        phrase for phrase in _NO_FACE_FRAMINGS if phrase in motion_prompt.lower()
+    ]
+    if motion_hits:
+        motion_prompt = _strip_no_face(motion_prompt, motion_hits)
+        fixes.append(
+            f"分镜 {shot_id} 的 motion_prompt 含挡脸构图词"
+            f"（{', '.join(motion_hits)}），已删除"
+        )
+
+    shrink_hits = [p for p in _SHRINK_MOVES if p in motion_prompt.lower()]
+    if shrink_hits:
+        cleaned = _strip_no_face(motion_prompt, shrink_hits)
+        motion_prompt = (
+            f"{_CAMERA_LOCK_MOTION}, {cleaned}" if cleaned else _CAMERA_LOCK_MOTION
+        )
+        msg = (
+            f"分镜 {shot_id} 有台词但运镜在拉远（{', '.join(shrink_hits)}），"
+            f"已改为慢推近——拉远后主体变小，口型同步会整镜跳过"
+        )
+        fixes.append(msg)
+        logger.warning("%s", msg)
+
+    if not any(cue in motion_prompt.lower() for cue in _SPEAKING_CUES):
+        motion_prompt = (
+            f"{motion_prompt}, {_SPEAKING_MOTION}" if motion_prompt else _SPEAKING_MOTION
+        )
+        fixes.append(f"分镜 {shot_id} 有台词但 motion_prompt 无口部动作，已补入")
+    return image_prompt, motion_prompt
+
+
 def _normalize_shot(
     item: object, fallback_id: int, characters: dict[int, Character]
 ) -> Shot | None:
@@ -412,11 +566,45 @@ def _normalize_shot(
                 shot_characters.append(cid)
             elif cid:
                 fixes.append(f"出场角色 {cid} 未在 characters 定义，忽略")
+    # 有台词的发言人必须出现在该镜画面里，否则成片是"画外人在说话"，
+    # 口型同步也找不到那张脸（补进 characters 后 description 会自动补进
+    # image_prompt，至少保证人真的在画面中）
+    absent_speakers = sorted({
+        line.speaker for line in dialogue
+        if line.speaker in characters and line.speaker not in shot_characters
+    })
+    if absent_speakers:
+        shot_characters.extend(absent_speakers)
+        msg = (
+            f"分镜 {shot_id} 的发言人 "
+            f"{'、'.join(str(cid) for cid in absent_speakers)} 未列入 characters，"
+            f"已补入（否则只有声音没有画面）"
+        )
+        fixes.append(msg)
+        logger.warning("%s", msg)
     missing = [cid for cid in shot_characters if characters[cid].description not in image_prompt]
     if missing:
         appended = ", ".join(characters[cid].description for cid in missing)
         image_prompt = f"{image_prompt}, {appended}"
         fixes.append(f"image_prompt 补入角色 {missing} 的外观描述")
+
+    # 口播镜的画面必须看得见嘴：LatentSync 逐帧找正脸，一帧失败就整镜
+    # 跳过口型同步，成片里那个人就会"闭着嘴说话"。
+    speaking = [line for line in dialogue if line.speaker in characters]
+    if speaking:
+        image_prompt, motion_prompt = _make_face_visible(
+            shot_id, image_prompt, motion_prompt, fixes
+        )
+        speakers = {line.speaker for line in speaking}
+        if len(speakers) > 1:
+            names = "、".join(characters[cid].name or str(cid) for cid in sorted(speakers))
+            msg = (
+                f"分镜 {shot_id} 有 {len(speakers)} 个角色同时说话（{names}），"
+                f"一帧只能驱动一张脸的嘴型（其余人会动嘴但不对齐），"
+                f"建议拆成一镜一人"
+            )
+            fixes.append(msg)
+            logger.warning("%s", msg)
 
     if not image_prompt and dialogue:
         # 只有台词的镜头也要有画面：用台词原文兜底（仅防丢镜）

@@ -93,16 +93,6 @@ STEPS: list[dict[str, Any]] = [
         "description": "逐镜 SDXL 文生图 → frames/（直跑 stages，不耗 LLM）",
     },
     {
-        "id": "generate_videos",
-        "label": "生成视频片段",
-        "agent": "video_generator",
-        "kind": "media",
-        "stage": "clips",
-        "artifact": f"{CLIPS_DIR}/manifest.json",
-        "requires": [f"{FRAMES_DIR}/manifest.json"],
-        "description": "逐镜 LTX 图生视频 → clips/（直跑 stages，不耗 LLM）",
-    },
-    {
         "id": "generate_voiceover",
         "label": "生成配音",
         "agent": "voiceover_artist",
@@ -111,6 +101,16 @@ STEPS: list[dict[str, Any]] = [
         "artifact": f"{AUDIO_DIR}/manifest.json",
         "requires": ["storyboard.json"],
         "description": "逐镜中文配音（IndexTTS-2.5/edge-tts 回退链）→ audio/（直跑 stages，不耗 LLM）",
+    },
+    {
+        "id": "generate_videos",
+        "label": "生成视频片段",
+        "agent": "video_generator",
+        "kind": "media",
+        "stage": "clips",
+        "artifact": f"{CLIPS_DIR}/manifest.json",
+        "requires": [f"{FRAMES_DIR}/manifest.json"],
+        "description": "逐镜 LTX 图生视频 → clips/（有配音时按真实配音时长定帧数，直跑 stages，不耗 LLM）",
     },
     {
         "id": "sync_lips",

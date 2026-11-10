@@ -41,6 +41,8 @@ DEFAULT_UPSCALE_SHARPEN = 0.3
 #   仅在明确要这种迷因效果时才用。
 DEFAULT_PAD_MODE = "slow"
 DEFAULT_PAD_SLOW_MAX = 1.3
+# 目标响度（LUFS）。移动端平台把 -14 当"正常音量"，-16 在手机上偏轻。
+DEFAULT_LOUDNESS_LUFS = -14.0
 
 
 def _env_float(name: str, default: float) -> float:
@@ -48,6 +50,14 @@ def _env_float(name: str, default: float) -> float:
         return float(os.getenv(name, "").strip() or default)
     except ValueError:
         return default
+
+
+def loudness_lufs() -> float:
+    """目标响度（LUFS）。默认 -14：抖音/视频号等移动端平台把它当"正常
+
+    音量"，-16 在手机上听着明显偏轻。可用 PROMPT2VID_LOUDNESS_LUFS 覆盖。
+    """
+    return _env_float("PROMPT2VID_LOUDNESS_LUFS", DEFAULT_LOUDNESS_LUFS)
 
 
 def _even(value: float) -> int:
@@ -656,8 +666,9 @@ def fit_audio(
 ) -> Path:
     """把音频对齐到指定时长：长则截断、短则静音填充，输出统一 wav。
 
-    音频经响度归一（loudnorm，-16 LUFS，edge-tts 输出偏轻）；
-    音频缺失时生成等时长静音。
+    音频经响度归一（loudnorm，默认 -14 LUFS：抖音/视频号等移动端平台
+    普遍把 -14 LUFS 当作"正常音量"，-16 在手机上听着偏轻；可用
+    PROMPT2VID_LOUDNESS_LUFS 覆盖）；音频缺失时生成等时长静音。
 
     speedup > 1 时先用 atempo 提速（变速不变调）压短旁白——比让画面
     定格/降速拖长更贴合口型；调用方负责把该系数写进字幕时间轴。
@@ -680,8 +691,8 @@ def fit_audio(
                         "-t", dur, str(dest)])
             return dest
         run_ffmpeg(["-i", str(audio),
-                    "-af", f"{tempo}loudnorm=I=-16:TP=-1.5:LRA=11,apad", "-t", dur,
-                    "-ar", "44100", "-ac", "1", str(dest)])
+                    "-af", f"{tempo}loudnorm=I={loudness_lufs():g}:TP=-1.5:LRA=11,apad",
+                    "-t", dur, "-ar", "44100", "-ac", "1", str(dest)])
     else:
         run_ffmpeg(["-f", "lavfi", "-i", "anullsrc=r=44100:cl=mono",
                     "-t", dur, str(dest)])
@@ -763,8 +774,11 @@ def mux_and_burn(
                 bgm_volume = 0.25
         args += [
             "-filter_complex",
+            # normalize=0：不做 1/N 衰减，旁白保持原增益，只让 BGM 按配比压低；
+            # 末尾 loudnorm 把整体拉回统一目标响度（否则叠 BGM 后旁白被稀释）。
             f"[1:a]volume=1.0[a1];[2:a]volume={bgm_volume:.2f}[a2];"
-            "[a1][a2]amix=inputs=2:duration=first[aout]",
+            f"[a1][a2]amix=inputs=2:duration=first:normalize=0[amixed];"
+            f"[amixed]loudnorm=I={loudness_lufs():g}:TP=-1.5:LRA=11[aout]",
             "-map", "0:v:0", "-map", "[aout]",
         ]
     else:

@@ -485,7 +485,7 @@ def check_environment(
                     name=f"T5 文本编码器（{t5}）",
                     ok=t5 in clips,
                     detail=f"可用: {', '.join(clips[:5]) or '无'}",
-                    hint="把 t5xxl fp8 放入 ComfyUI models/text_encoders/，或修改 .env 的 COMFYUI_T5",
+                    hint="把 T5 文本编码器（t5xxl_*.safetensors）放入 ComfyUI models/text_encoders/（或软链进去）并重启，或修改对应档位 .env 的 COMFYUI_T5",
                 )
             )
             checks.append(

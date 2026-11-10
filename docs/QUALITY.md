@@ -69,7 +69,10 @@
   想要 720 宽输出又不冒 OOM 风险：保持 589824 + 开
   `PROMPT2VID_UPSCALE=720`（×1.25 放大痕迹很小）；
 - T5 留 CPU：T5 只在每镜开头跑一次（几秒），搬上 GPU 省不了多少时间，
-  却挤占 13B 的激活空间；
+  却挤占 13B 的激活空间。本档用 **fp16** 版（`t5xxl_fp16.safetensors`，
+  9.79GB），放文件存储 `/autodl-fs/data` 再软链到
+  `models/text_encoders/`，不占数据盘；fp8 → fp16 换来更干净的字词
+  理解与更少的编码截断。8GB/12GB 档不要跟着换（必 OOM）；
 - 写实题材本档原生优势（RealVisXL V5）；动漫题材建议把
   `COMFYUI_T2I_CHECKPOINT` 换成 `animagine-xl-3.1.safetensors`
   （cagliostrolab/animagine-xl-3.1，6.9GB，动漫原生 SDXL），比
@@ -206,6 +209,48 @@ curl -L -o models/tts/zh_CN-huayan-medium.onnx.json \
 
 > 注意：`models/` 已在 .gitignore（音色文件 60MB+，不要提交进仓库）。
 
+## 画面稳定性（LTX 提示词与阶段顺序）
+
+图生视频阶段的画面「跑题」基本来自两件事，现都已按默认值修好：
+
+1. **正向提示词不要再喂首帧的构图描述**。LTX-13B 会把 `image_prompt` 里的
+   元素词当成「新场景」重新构图，于是出现同一镜中途硬切、人物变脸、模型
+   自己烧出满屏假字幕/台标/海报（它的训练集里有大量带硬字幕的短视频）。
+   现在默认 `COMFYUI_LTX_PROMPT_MODE=motion`：正向词只给运镜/动作描述 +
+   固定的首帧锚点（`single continuous shot, the same character and the same
+   background as the first frame, no scene change, no cut, no new subject
+   enters`）。首帧已经决定了构图，不需要再用文字复述一遍。
+   `COMFYUI_LTX_PROMPT_MODE=full` 退回旧行为（构图词也拼进去），只在确认
+   提示词干净、想看更多自由发挥时才用；`COMFYUI_LTX_PROMPT_ANCHOR` /
+   `COMFYUI_LTX_PROMPT_SUFFIX` 可覆盖默认锚点与后缀。
+2. **配音先于生视频**。媒体阶段顺序是 `frames → voiceovers → clips →
+   lipsync → render → quality`：每镜画面帧数按**该镜配音的真实时长**
+   （+0.4s 余量）算，而不是按分镜里按语速估算的 `duration_seconds`。
+   估算偏短时，旧顺序只能靠降速 + 定格末帧把画面垫到配音长度，看起来
+   就是「一张图在念台词」。断点续跑（`--resume`）时若音频 manifest 缺失，
+   才退回按分镜估时生成。
+3. **台词镜不拉远、不放挡脸构图**。LatentSync 逐帧找正脸，任何一帧检不到
+   就整镜跳过口型同步——成片里那个人就成了「闭着嘴说话」。所以分镜解析
+   阶段对有台词（发言人是在册角色）的镜头做两件事：
+   - `image_prompt` 里的挡脸构图词（`seen from behind` / `at the top of the
+     frame` / `half his face` / `in soft focus` …）会被删掉并改写成
+     `front-facing medium close-up ...`；
+   - `motion_prompt` 里的**拉远运镜**（`slow zoom out` / `dolly back` /
+     `pull back` / `crane up` / `tilt up` …）会被换成慢推近——喂 `zoom out`
+    给 LTX 它会真的拉到全身，主体一小、背景还要模型现编，实测玉帝从红墙
+     半身镜变成金云全身镜（同镜换了景别和背景）。纯旁白镜/空镜不受影响，
+     空镜的拉远是有意设计。
+
+写分镜时对 `motion_prompt` 的建议：只写**主体本身的动作 + 轻微运镜**，
+不要把其他主体写进去（例如台词镜里写 `the white sedan slowly steers
+around the pothole`，LTX 会真的把那辆车画进来）。
+
+| 变量 | 默认 | 说明 |
+|------|------|------|
+| `COMFYUI_LTX_PROMPT_MODE` | motion | `motion`=只喂动作/运镜 + 首帧锚点；`full`=旧行为（含 `image_prompt`） |
+| `COMFYUI_LTX_PROMPT_ANCHOR` | 见上文 | 追加到正向词尾部的「不切镜/不换场景」锚点；留空关闭 |
+| `PROMPT2VID_LOUDNESS_LUFS` | -14 | 配音与成片的响度基准（TP=-1.5 防削波）。平台低于 -20 LUFS 会像「没声音」 |
+
 ## 口型同步（LatentSync）
 
 配音阶段之后的增强媒体阶段：用每镜音轨（角色台词 + 旁白）驱动片段人物唇形，
@@ -293,6 +338,9 @@ curl -L -o models/tts/zh_CN-huayan-medium.onnx.json \
 | 画面卡顿不跟手 | 25fps 原生帧率 | `PROMPT2VID_SMOOTH_FPS=50`（或 RIFE），人物镜头别开 |
 | 播放器里没声音 | `final.mp4` 有 aac 音轨；`final/merged.mp4` 是无声中间产物 | 播 `final/final.mp4`；`python -c "from prompt2vid import ffmpeg_ops; print(ffmpeg_ops.probe_file('…/final.mp4'))"` 看到 `has_audio: True` 即正常 |
 | 人物被裁/比例失真 | 首帧与视频画幅不一致 | 保持 `COMFYUI_T2I_WIDTH/HEIGHT` 默认，勿手设 `COMFYUI_LTX_WIDTH` |
+| 一镜中途硬切成别的场景/人物变脸/满屏乱码字幕 | LTX 把 `image_prompt` 里的构图元素当成新场景重画（训练集含大量硬字幕短视频） | 默认已改 `COMFYUI_LTX_PROMPT_MODE=motion`（只喂动作词 + 首帧锚点）并扩充负向词（字幕/台标/切镜）；确认没把 `COMFYUI_LTX_NEGATIVE_PROMPT` 清空覆盖 |
+| 画面像一张静止图片在配音 | 分镜估时比配音短，旧顺序靠降速 + 定格末帧把画面垫长 | 媒体阶段已改为 `voiceovers` 先跑、`clips` 按真实配音时长定帧数；若单镜配音超 LTX 帧数上限（257 帧 ≈10.2s）仍会定格，看 run.log 的「超出 LTX 单镜上限」告警并精简台词/拆镜 |
+| 角色没开口却在说话（该镜 `lipsync` 为 `skipped`） | LatentSync 逐帧检脸，一帧失败整镜跳过；侧脸/挡脸构图/远景小脸必失败 | 分镜阶段已强制把有台词角色改成可见面部的中近景（`_make_face_visible`）；画面里确实没有人脸时属正常跳过，请检查该镜 `image_prompt` 是否写成了背面/遮挡 |
 | 手指/肢体崩坏 | LTX 常见问题 | 已默认注入肢体稳定提示词（`COMFYUI_LTX_PROMPT_SUFFIX`）；13B 档明显好于 2B；换镜别硬重试，改运动描述 |
 | 全片风格不统一 | LLM 提示词漂移 | `PROMPT2VID_STYLE` + LoRA（两层硬约束，见 style.py） |
 | 换了参数看不出差别 | 种子随机 | `PROMPT2VID_SEED=42` 固定后 A/B |

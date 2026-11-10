@@ -93,7 +93,7 @@ def test_registry_matches_task_order():
     assert [i for i in steps.STEP_IDS if i in TASK_ORDER] == TASK_ORDER
     assert steps.STEP_IDS == [
         "analyze_requirement", "write_script", "plan_storyboard",
-        "generate_images", "generate_videos", "generate_voiceover",
+        "generate_images", "generate_voiceover", "generate_videos",
         "sync_lips", "edit_video", "inspect_quality", "publish_douyin",
     ]
     lipsync = steps.STEP_BY_ID["sync_lips"]
@@ -244,20 +244,20 @@ def test_run_steps_stops_on_failure(tmp_path, fake_crews, fake_stages, monkeypat
 
     results = steps.run_steps(tmp_path, prompt="p")
 
-    # 创意三步 + 生图成功，clips 失败后停止，后续步骤未执行
-    assert [r["status"] for r in results] == ["done"] * 4 + ["failed"]
-    assert fake_stages == ["frames", "clips"]
+    # 创意三步 + 生图 + 配音成功，clips 失败后停止，后续步骤未执行
+    assert [r["status"] for r in results] == ["done"] * 5 + ["failed"]
+    assert fake_stages == ["frames", "voiceovers", "clips"]
     states = json.loads((tmp_path / "steps.json").read_text(encoding="utf-8"))
     assert states["generate_videos"]["status"] == "failed"
-    assert "generate_voiceover" not in states  # 未执行的步骤没有记录
+    assert "sync_lips" not in states  # 未执行的步骤没有记录
 
 
 def test_run_steps_order_follows_pipeline(tmp_path, fake_stages):
-    # 乱序传入仍按流水线顺序执行（阶段名：clips → voiceovers → render）
+    # 乱序传入仍按流水线顺序执行（阶段名：voiceovers → clips → render）
     results = steps.run_steps(
         tmp_path, ["edit_video", "generate_voiceover", "generate_videos"], prompt="p"
     )
-    assert fake_stages == ["clips", "voiceovers", "render"]
+    assert fake_stages == ["voiceovers", "clips", "render"]
     assert all(r["status"] == "done" for r in results)
 
 

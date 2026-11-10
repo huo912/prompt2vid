@@ -29,8 +29,10 @@ from .workspace import set_workspace
 CREATIVE_TASKS = ["analyze_requirement", "write_script", "plan_storyboard"]
 PUBLISH_TASK = "publish_douyin"
 
-# 媒体阶段（顺序）
-MEDIA_STAGES = ["frames", "clips", "voiceovers", "lipsync", "render", "quality"]
+# 媒体阶段（顺序）。配音必须排在生视频之前：LTX 每镜生成多少秒画面要
+# 跟着真实配音时长走，否则只能靠降速/定格末帧垫长，成片会出现「一张图
+# 在念台词」的静止感（实测 3s 分镜配 5.8s 台词，2s 多是定格画面）。
+MEDIA_STAGES = ["frames", "voiceovers", "clips", "lipsync", "render", "quality"]
 _STAGE_FUNCS: dict[str, Any] = {
     "frames": stages.generate_frames,
     "clips": stages.generate_clips,

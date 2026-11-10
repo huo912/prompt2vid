@@ -400,6 +400,61 @@ def test_dialogue_speaker_resolution(tmp_path: Path):
     assert any("路人甲" in f for f in shots[0].fixes)
 
 
+def test_speaking_shot_strips_no_face_framing_from_prompts(tmp_path: Path):
+    """有台词的镜头：image_prompt 与 motion_prompt 里的挡脸构图词都要清掉。"""
+    characters = [{"id": 1, "name": "玉帝", "description": "an old emperor"}]
+    shot = {
+        "id": 1,
+        "characters": [1],
+        "image_prompt": "a hall, seen from behind at the very top edge of the frame",
+        "motion_prompt": "the emperor sighs at the top of the frame with lips moving",
+        "duration_seconds": 4,
+        "dialogue": [{"speaker": 1, "text": "朕知道了。"}],
+    }
+    path = _write_with_characters(tmp_path, shots=[shot], characters=characters)
+    shots = storyboard.load_storyboard(path)
+
+    assert "seen from behind" not in shots[0].image_prompt
+    assert "top edge of the frame" not in shots[0].image_prompt
+    assert "front-facing medium close-up" in shots[0].image_prompt
+    assert "top of the frame" not in shots[0].motion_prompt
+    assert "with lips moving" in shots[0].motion_prompt
+
+
+def test_speaking_shot_replaces_zoom_out_with_zoom_in(tmp_path: Path):
+    """有台词的镜头：拉远运镜改成推近，避免主体变小后口型同步失效。"""
+    characters = [{"id": 1, "name": "玉帝", "description": "an old emperor"}]
+    shot = {
+        "id": 1,
+        "characters": [1],
+        "image_prompt": "a hall",
+        "motion_prompt": "slow zoom out, the emperor speaks with lips moving",
+        "duration_seconds": 4,
+        "dialogue": [{"speaker": 1, "text": "朕知道了。"}],
+    }
+    path = _write_with_characters(tmp_path, shots=[shot], characters=characters)
+    shots = storyboard.load_storyboard(path)
+
+    assert "zoom out" not in shots[0].motion_prompt
+    assert shots[0].motion_prompt.startswith(storyboard._CAMERA_LOCK_MOTION)
+    assert "the emperor speaks with lips moving" in shots[0].motion_prompt
+    assert any("运镜在拉远" in f for f in shots[0].fixes)
+
+
+def test_narration_only_shot_keeps_zoom_out(tmp_path: Path):
+    """纯旁白镜（没人开口）不锁运镜：空镜的拉远是有意设计。"""
+    shot = {
+        "id": 1,
+        "image_prompt": "a city skyline",
+        "motion_prompt": "slow zoom out",
+        "duration_seconds": 4,
+        "dialogue": [{"speaker": "旁白", "text": "城市很大。"}],
+    }
+    path = _write_with_characters(tmp_path, shots=[shot])
+    shots = storyboard.load_storyboard(path)
+    assert shots[0].motion_prompt == "slow zoom out"
+
+
 def test_dialogue_accepts_prefixed_strings_and_dict_singleton(tmp_path: Path):
     """dialogue 也宽容接受 "角色名：台词" 字符串与单个对象。"""
     characters = [{"id": 1, "name": "女主", "description": "a young woman"}]
