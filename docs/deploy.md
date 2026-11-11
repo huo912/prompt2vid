@@ -583,52 +583,52 @@ COMFYUI_LTX_LORA_STRENGTH=0.8     # 5090 档已设 0.9（显存富余可再调�
 LoRA +（可选）clone 一个节点包 + 启动**，其余由项目代码通过 API 完成；
 `prompt2vid --check-only` 是验证配置是否正确的唯一入口。
 
-hf download stabilityai/stable-diffusion-xl-base-1.0 sd_xl_base_1.0.safetensors
---local-dir "$MODELS/checkpoints"
+## 附：一个「乡村爱情口吻」的完整调用示例
 
-hf download Lightricks/LTX-Video ltx-video-2b-v0.9.5.safetensors
---local-dir "$MODELS/checkpoints"
+配音「像读课文」是这条链路上最常被吐槽的问题，这个例子把三层都打开了：
+剧本写成人话、角色卡写口吻（`delivery`）、音色挑对人（见
+[QUALITY.md §配音不像读课文](QUALITY.md)）。
 
-hf download comfyanonymous/flux_text_encoders t5xxl_fp8_e4m3fn.safetensors
---local-dir "$MODELS/text_encoders"
+```bash
+prompt2vid "话说玉皇大帝心血来潮，驾着祥云溜达到沈阳上空，本想看看这
+'共和国长子'的繁华景象，结果往下一瞅，差点没从龙椅上摔下来——好端端的
+马路被刨得跟癞痢头似的，到处支着蓝皮铁围栏，写着'前方施工，请绕行'，
+绕来绕去最后还是得从坑里过。
 
-cd "<ComfyUI目录>\custom_nodes"
-git clone https://github.com/chenpipi0807/ComfyUI-Index-TTS.git
-pip install -r ComfyUI-Index-TTS\requirements.txt
-python ComfyUI-Index-TTS\TTS2_5_download.py # 模型约 8-10GB，支持 hf-mirror
+玉帝不仅没生气，反而抚须大笑：'好一个沈阳！这基建力度，比朕当年修
+南天门还勤快！'沈阳基建负责人叼着烟，吐了个烟圈：'哎呀仙长你不懂，
+这路要是修得太结实，三五年不动工，我们手底下几千号兄弟去哪领工资？'
+玉帝沉默良久，长叹一声：'传朕旨意，以后凡间"施工"二字，改名为"养人"。'
 
-git clone https://github.com/ShmuelRonen/ComfyUI-LatentSyncWrapper.git
-pip install -r ComfyUI-LatentSyncWrapper\requirements.txt # 首次运行自动下模型（约 7GB）
-git clone https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite.git # 如未装
+人物口吻：玉帝用赵本山式东北老大爷的口吻，慢条斯理、拉长音、蔫儿坏；
+基建负责人用刘能式口吻，急赤白脸、爱抢话、一嘴大碴子味；哮天犬用赵四
+式口吻，含含糊糊、一惊一乍。配音要有感情，不要像读课文；尽量搞笑，
+把讽刺意味表达出来并夸大。" --env-file minimax-h3.4090
+```
 
-cd /root/autodl-tmp/ComfyUI
-nohup python main.py --listen 127.0.0.1 --port 8188 > comfyui.log 2>&1 & tail -f comfyui.log
+跑之前确认这两项（`minimax-h3.4090` 档已默认）：
 
-ssh -N -L 8188:127.0.0.1:8188 -p 45335 root@connect.westb.seetacloud.com
+```bash
+PROMPT2VID_TTS_EMOTION_WEIGHT=0.8   # 0.6 只是「有点情绪」，喜剧要 0.8
+PROMPT2VID_TTS_KEEP_CACHED=true     # 整批逐镜合成免反复换入换出
+```
 
-ssh
+生成的 `storyboard.json` 里，每个有台词的角色卡应该长这样——`delivery`
+是**必填**的，它就是「不是同一个人在念稿」的关键：
 
-# 密码 / 端口见 AutoDL 控制台「自定义服务」，勿写进仓库（或改用免密登录）
+```json
+{
+  "id": 1,
+  "name": "玉帝",
+  "timbre": "北京大爷.mp3",
+  "delivery": "东北农村老大爷，赵本山式慢条斯理、拉长音、蔫儿坏，爱反问",
+  "dialogue": [
+    { "speaker": 1, "text": "好一个沈阳！比朕当年修南天门还勤快！",
+      "emotion": "阴阳怪气地夸，尾音上扬，突然拔高" }
+  ]
+}
+```
 
-source .venv/bin/activate
-
-prompt2vid "一只戴着安全帽、叼着施工图纸的哈士奇，站在沈阳街头，前爪握着一支巨大的毛笔，像指挥家一样大笔一挥，面前原本平整崭新的柏油马路瞬间被画成一块一块的方块补丁。道路看起来像刚出土的兵马俑坑，东一块、西一块，深浅不一，仿佛城市地下藏着一支等待修复的陶土军团。哈士奇眼神无辜又认真，尾巴摇得像施工警示灯，身后还拖着几块“前方施工”“请绕行”“刚修好，别 踩”的铁皮牌子。
-画面风格为夸张搞笑卡通插画，色彩明亮，带一点尘土飞扬的怀旧感。背景是沈阳的城市街景：老式居民楼、地铁围挡、共享单车、公交站牌，远处隐约可见故宫角楼和中街商圈。天空灰蒙蒙却不压抑，反而像一首老歌的前奏。
-配文风格参考《沈阳啊沈阳，我的故乡》：“沈阳啊沈阳，我的故乡，马路上尘土飞扬；刚铺好的路 ，转眼又开膛，哈士奇挥笔补补丁忙。”整体氛围既吐槽又亲切，把“年年修、年年挖、年年补”的城 市日常，变成一只哈士奇用毛笔给马路打补丁的荒诞喜剧。" --env-file 4090
-
-export HF_ENDPOINT=https://hf-mirror.com
-export HF_HUB_DISABLE_XET=1
-hf download ByteDance/LatentSync-1.6 --local-dir /root/autodl-tmp/LatentSync-1.6
-
-prompt2vid-server --env-file 4090-low
-
-话说玉皇大帝心血来潮，驾着祥云溜达到沈阳上空，本想看看这“共和国长子”的繁华景象，结果往下一瞅，差点没从龙椅上摔下来。只见地面上，好端端的马路被刨得跟癞痢头似的，东一块西一块全是补丁。到处支着蓝皮铁围栏，上面写着“前方施工，请绕行”，绕来绕去，最后发现还是得从坑里过。
-玉帝不仅没生气，反而抚须大笑：“好一个沈阳！这基建力度，比朕当年修南天门还勤快！传旨，让天庭基建管理部全体下凡，来沈阳取经学习！”
-天庭基建部的天兵天将们到了现场，一个个看得目瞪口呆。一位负责天河疏浚的天官指着一段刚铺好又挖开的路，不解地问：“这路昨天才铺的沥青，今天怎么又刨了？是为了埋什么天级法宝吗？”
-沈阳基建负责人叼着烟，吐了个烟圈，一脸高深莫测地解释道：“哎呀，仙长你不懂。这路要是修得太结实，三五年不动工，那我们手底下这几千号兄弟去哪领工资？这挖掘机一停，人心就散了。我们这不叫修路，这叫‘以工代赈，循环就业’。要想富，先修路；要想有活干，路得反复刨。”
-天庭基建部部长听完，当场就跪了，痛哭流涕：“玉帝啊，咱们天庭太落后了！咱们那蟠桃园的路，一万年才修一次，导致大量天兵天将闲置，原来症结在这儿啊！咱们应该把南天门拆了重修，修完再拆，以此以此保障天界GDP稳步增长！”
-玉帝听完汇报，沉默良久，最后长叹一声：“传朕旨意，以后凡间‘施工’二字，改名为‘养人’。另外，把二郎神的哮天犬调来沈阳，专门负责闻哪儿没挖开，就在那儿下嘴刨，以此以此解决天庭失业问题。”
-
-要求玉帝角色，赵本山口吻；哮天犬角色，赵四口吻；沈阳基建，刘能口吻。配音要有感情，不要像读课文。尽量的搞笑，能把讽刺意味表达出来，并夸大。
-
-ssh -p 45335 root@connect.westb.seetacloud.com / 3HZNY0yoLxDB
+```bash
+prompt2vid --check-only --env-file minimax-h3.4090   # 预检通过再真跑
+```
