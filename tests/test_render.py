@@ -123,11 +123,16 @@ def _install_ffmpeg_mocks(monkeypatch, clip_durations: dict[int, float],
                        Path(srt).name if srt else None, bgm))
         return touch(dest)
 
+    def fake_web_preview(src, dest):
+        events.append(("web_preview", Path(src).name, Path(dest).name))
+        return touch(dest)
+
     monkeypatch.setattr(stages.ffmpeg_ops, "probe_file", fake_probe)
     monkeypatch.setattr(stages.ffmpeg_ops, "fit_audio", fake_fit_audio)
     monkeypatch.setattr(stages.ffmpeg_ops, "normalize_clip", fake_normalize)
     monkeypatch.setattr(stages.ffmpeg_ops, "concat_media", fake_concat)
     monkeypatch.setattr(stages.ffmpeg_ops, "mux_and_burn", fake_mux)
+    monkeypatch.setattr(stages.ffmpeg_ops, "web_preview", fake_web_preview)
     return events
 
 
@@ -150,17 +155,37 @@ def test_render_final_orchestration(render_workspace, monkeypatch):
     mux = [e for e in events if e[0] == "mux"][0]
     assert mux[3] == "final.srt"
     assert mux[4] is None
+    # 额外产出网页预览版（MP3 音轨，兼容解不了 AAC 的浏览器）
+    assert ("web_preview", "final.mp4", "preview.mp4") in events
+    assert (ws / "final" / "preview.mp4").is_file()
     # 成片与报告
     final = ws / "final" / "final.mp4"
     assert final.is_file()
     assert (ws / "final" / "render_report.json").is_file()
     assert report["final_video"] == str(final.resolve())
+    assert report["preview_video"] == str((ws / "final" / "preview.mp4").resolve())
     assert report["audio_overruns"] == []
     # SRT 时间轴基于真实时长累计（0-2s、2-5s）
     srt = (ws / "final" / "final.srt").read_text(encoding="utf-8")
     assert "00:00:00,000 --> 00:00:02,000" in srt
     assert "00:00:02,000 --> 00:00:05,000" in srt
     assert "第一镜" in srt and "第二镜" in srt
+
+
+def test_render_final_skips_web_preview_when_disabled(render_workspace, monkeypatch):
+    """PROMPT2VID_WEB_PREVIEW=off 时不生成预览版（只留 AAC 成片）。"""
+    ws = render_workspace
+    monkeypatch.setenv("PROMPT2VID_WEB_PREVIEW", "off")
+    events = _install_ffmpeg_mocks(
+        monkeypatch, clip_durations={1: 2.0, 2: 3.0}, audio_durations={1: 2.0}
+    )
+
+    report = stages.render_final()
+
+    assert "error" not in report, report
+    assert [e for e in events if e[0] == "web_preview"] == []
+    assert report["preview_video"] is None
+    assert not (ws / "final" / "preview.mp4").exists()
 
 
 def test_render_final_extends_video_when_audio_longer(render_workspace, monkeypatch):

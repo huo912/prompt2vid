@@ -782,3 +782,29 @@ def mux_and_burn(
     ]
     run_ffmpeg(args)
     return dest
+
+
+def web_preview(src: str | Path, dest: str | Path) -> Path:
+    """把成片重封装成「网页能直接出声」的预览文件（preview.mp4）。
+
+    `final.mp4` 的音轨是 AAC——抖音等平台发布要求 AAC，但部分浏览器
+    内核（VS Code 内置 Chromium、未带私有编解码器的 Electron/Chromium
+    构建）只能解 H.264 画面、解不了 AAC 音频，表现为「有画面没声音」。
+    预览文件把视频流原样 copy（画质零损失、秒级完成），仅把音轨转成
+    MP3——几乎所有内核对 MP3 都有内置解码器。
+    """
+    src, dest = Path(src), Path(dest)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    info = probe_file(src)
+    if not info.get("has_audio"):
+        raise ValueError(f"源文件没有音轨，无法生成预览: {src}")
+    run_ffmpeg([
+        "-i", str(src),
+        "-map", "0:v:0", "-map", "0:a:0",
+        "-c:v", "copy",
+        "-c:a", "libmp3lame", "-b:a", "192k",
+        # 手机上边下边播同样受益于 moov 前置
+        "-movflags", "+faststart",
+        str(dest),
+    ])
+    return dest

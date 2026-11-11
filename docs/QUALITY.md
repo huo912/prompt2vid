@@ -333,7 +333,7 @@ curl -L -o models/tts/zh_CN-huayan-medium.onnx.json \
 | 暗部/天空出现色带 | 中转 WEBM CRF 32 旧默认 | 已默认改 20；老运行目录用 `--force` 重跑 clips |
 | 成片比预览糊 | 两代 CRF 23 转码叠加 | 已分层为 16/18；确认没把 CRF 手动调高 |
 | 画面卡顿不跟手 | 25fps 原生帧率 | `PROMPT2VID_SMOOTH_FPS=50`（或 RIFE），人物镜头别开 |
-| 播放器里没声音 | `final.mp4` 有 aac 音轨；`final/merged.mp4` 是无声中间产物 | 播 `final/final.mp4`；`python -c "from prompt2vid import ffmpeg_ops; print(ffmpeg_ops.probe_file('…/final.mp4'))"` 看到 `has_audio: True` 即正常 |
+| 播放器里没声音 | ① `final/merged.mp4` 是无声中间产物 ② 成片音轨是 AAC，而部分浏览器内核（VS Code 内置 Chromium、未带私有编解码器的 Electron/Chromium）解不了 AAC——画面正常跑、`webkitAudioDecodedByteCount` 一直是 0 | ① 播 `final/final.mp4`；`ffmpeg_ops.probe_file('…/final.mp4')` 看到 `has_audio: True` 即有声 ② 渲染阶段会自动产出 `final/preview.mp4`（视频流 copy、音轨转 MP3），网页控制台默认播预览版；老运行可用 `ffmpeg_ops.web_preview('…/final.mp4', '…/final/preview.mp4')` 补一份，或直接用 Chrome/系统播放器打开 final.mp4 |
 | 人物被裁/比例失真 | 首帧与视频画幅不一致 | 保持 `COMFYUI_T2I_WIDTH/HEIGHT` 默认，勿手设 `COMFYUI_LTX_WIDTH` |
 | 手指/肢体崩坏 | LTX 常见问题 | 已默认注入肢体稳定提示词（`COMFYUI_LTX_PROMPT_SUFFIX`）；13B 档明显好于 2B；换镜别硬重试，改运动描述 |
 | 全片风格不统一 | LLM 提示词漂移 | `PROMPT2VID_STYLE` + LoRA（两层硬约束，见 style.py） |

@@ -1112,10 +1112,25 @@ def render_final(workspace: str | Path | None = None) -> dict:
         upscale_to=upscale_to,
     )
 
+    # 成片的音轨是 AAC（抖音等平台要求），但部分浏览器内核（含 VS Code
+    # 内置 Chromium）解不了 AAC，播放时「有画面没声音」。额外重封装一份
+    # 音轨为 MP3 的 preview.mp4 供网页直接播放：视频流 copy，几乎零成本。
+    preview: Path | None = None
+    preview_switch = env_str("PROMPT2VID_WEB_PREVIEW", "on").strip().lower()
+    if preview_switch not in ("0", "off", "false", "no"):
+        try:
+            preview = ffmpeg_ops.web_preview(
+                final, ws / FINAL_DIR / "preview.mp4"
+            )
+            logger.info("render: 网页预览版（MP3 音轨）→ %s", preview.name)
+        except (RuntimeError, ValueError, FileNotFoundError) as exc:
+            logger.warning("render: 网页预览版生成失败（不影响成片）: %s", exc)
+
     probe = ffmpeg_ops.probe_file(final)
     report = {
         "stage": "render",
         "final_video": str(final.resolve()),
+        "preview_video": str(preview.resolve()) if preview else None,
         "srt": str(srt.resolve()) if srt else None,
         "bgm": str(bgm) if bgm else None,
         "duration_seconds": probe["duration_seconds"],

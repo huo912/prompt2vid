@@ -356,6 +356,7 @@ export PROMPT2VID_PROFILE=4090                    # 或只给档位简名
 | `PROMPT2VID_SMOOTH_FPS` | 可选 CPU 补帧（minterpolate，建议 50；快速运动可能形变，默认关） |
 | `PROMPT2VID_TRANSITION` / `PROMPT2VID_TRANSITION_TYPE` | 镜头间交叉过渡（默认 0.5s `fade` 叠化；设 0 关闭回硬切；音轨/字幕时间轴不受影响） |
 | `PROMPT2VID_VIDEO_CRF` / `PROMPT2VID_CLIP_CRF` / `PROMPT2VID_X264_PRESET` | 转码质量分层：成片 CRF 18 / 中转 CRF 16 / x264 预设 medium |
+| `PROMPT2VID_WEB_PREVIEW` | 渲染完额外重封装 `final/preview.mp4`（视频流 copy，音轨转 MP3）：成片是 AAC 音轨（平台要求），部分浏览器（含 VS Code 内置浏览器）解不了 AAC，播 final.mp4 会「有画面没声音」；预览版给网页播放，默认开，设 `off` 关闭 |
 | `COMFYUI_RETRIES` | 单镜生成失败重试次数（默认 2，按批次重试） |
 | `COMFYUI_IPADAPTER` | true 时启用角色一致性参考注入（分镜表含 `characters` 时先生成角色定妆照，出镜分镜首帧注入参考；需 ComfyUI 装 ComfyUI_IPAdapter_plus + 两个模型，见 [docs/LOCAL_SETUP.md](docs/LOCAL_SETUP.md) 第 6 节；未就位时自动回退无参考生成） |
 | `COMFYUI_IPADAPTER_PRESET` / `COMFYUI_IPADAPTER_WEIGHT` | IPAdapter 预设与注入权重（默认 `PLUS FACE (portraits)` / 0.8） |

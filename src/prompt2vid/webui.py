@@ -272,6 +272,9 @@ def run_detail(run_id: str) -> dict:
         execution = {**snap, "current_step": current_step if executing_here else None}
 
     final = run_dir / "final" / "final.mp4"
+    # 预览版：音轨为 MP3，兼容解不了 AAC 的浏览器（含 VS Code 内置浏览器），
+    # 没有该文件时前端自动回退到 final.mp4
+    preview = run_dir / "final" / "preview.mp4"
     return {
         "id": run_id,
         "dir": str(run_dir.resolve()),
@@ -280,6 +283,9 @@ def run_detail(run_id: str) -> dict:
         "execution": execution,
         "final_video": (
             f"/api/runs/{run_id}/files/final/final.mp4" if final.is_file() else None
+        ),
+        "preview_video": (
+            f"/api/runs/{run_id}/files/final/preview.mp4" if preview.is_file() else None
         ),
     }
 

@@ -111,6 +111,31 @@ def test_run_detail_artifact_fallback(client):
     assert detail["execution"] is None
 
 
+def test_run_detail_exposes_preview_video(client):
+    """有 preview.mp4 时返回预览地址（MP3 音轨，浏览器兼容）。"""
+    run_id = _create_run(client).json()["run_id"]
+    run_dir = _run_dir(run_id)
+    (run_dir / "final").mkdir(parents=True, exist_ok=True)
+    (run_dir / "final" / "final.mp4").write_bytes(b"x")
+    (run_dir / "final" / "preview.mp4").write_bytes(b"x")
+
+    detail = client.get(f"/api/runs/{run_id}").json()
+
+    assert detail["final_video"] == f"/api/runs/{run_id}/files/final/final.mp4"
+    assert detail["preview_video"] == f"/api/runs/{run_id}/files/final/preview.mp4"
+
+
+def test_run_detail_without_preview_video(client):
+    run_id = _create_run(client).json()["run_id"]
+    run_dir = _run_dir(run_id)
+    (run_dir / "final").mkdir(parents=True, exist_ok=True)
+    (run_dir / "final" / "final.mp4").write_bytes(b"x")
+
+    detail = client.get(f"/api/runs/{run_id}").json()
+
+    assert detail["preview_video"] is None
+
+
 def test_unknown_run_404(client):
     assert client.get("/api/runs/run_nope").status_code == 404
     assert client.get("/api/runs/run_nope/log").status_code == 404

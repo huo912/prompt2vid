@@ -194,13 +194,25 @@ async function renderArtifacts(d) {
   const parts = [];
 
   // 成片（视频播放）
-  if (d.final_video) {
+  if (d.final_video || d.preview_video) {
+    // 预览版音轨是 MP3：部分浏览器（含 VS Code 内置浏览器）解不了 final.mp4
+    // 的 AAC 音轨，直接播会出现「有画面没声音」，所以优先播预览版。
+    const playable = d.preview_video || d.final_video;
+    const note = d.preview_video
+      ? `<p class="hint">在线播放的是预览版（MP3 音轨，兼容所有浏览器）；发布/下载请用 final.mp4（AAC 音轨）。</p>`
+      : "";
     parts.push(`
       <details class="artifact" open>
         <summary>🎬 成片 final.mp4</summary>
         <div class="artifact-body">
-          <video controls preload="metadata" src="${d.final_video}"></video>
-          <div><a class="btn small link" href="${d.final_video}" target="_blank">新窗口打开</a></div>
+          <video controls preload="metadata" src="${playable}"></video>
+          ${note}
+          <div>
+            <a class="btn small link" href="${playable}" target="_blank">新窗口打开</a>
+            ${d.final_video && d.final_video !== playable
+              ? `<a class="btn small link" href="${d.final_video}" target="_blank">下载成片 final.mp4</a>`
+              : ""}
+          </div>
         </div>
       </details>`);
   }
