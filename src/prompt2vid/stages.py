@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import json
 import logging
-import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -38,8 +37,7 @@ from .comfyui_client import (
     env_str,
     image_dimensions,
     ipadapter_enabled,
-    ltx_fps,
-    resolve_ltx_size,
+    resolve_video_size,
     run_text_to_image,
 )
 from .storyboard import (
@@ -74,8 +72,8 @@ _LIPSYNC_NODES = (
 # 裁视频，画面富余才走"裁"而不是"补"，避免它自己补帧
 _LIPSYNC_TAIL = 0.15
 
-# LTX 帧数约束：length = 8n+1；帧率（COMFYUI_LTX_FPS，默认 25）与
-# 上限可配，帧率/上限读取统一走 comfyui_client.ltx_fps / ltx_max_frames
+# 帧数约束按视频后端切换：LTX length = 8n+1，MiniMax-H3 length = 17k+5；
+# 帧率/上限的读取统一走 comfyui_client.video_fps / video_max_frames
 # （工作流同源，避免两处默认值漂移）
 MIN_FRAMES = 9  # 8*1+1
 
@@ -101,18 +99,17 @@ def _ltx_prompt(shot: Shot) -> str:
 
 
 def frames_for_duration(seconds: float) -> int:
-    """把每镜时长换算为 LTX 帧数（8n+1，且不超过显存预算上限）。"""
-    fps = ltx_fps()
-    max_frames = comfyui_client.ltx_max_frames()
-    target = max(MIN_FRAMES, math.ceil(seconds * fps))
-    length = 8 * math.ceil((target - 1) / 8) + 1
-    if length > max_frames:
+    """把每镜时长换算为当前后端的帧数（LTX 8n+1 / H3 17k+5，不超上限）。"""
+    fps = comfyui_client.video_fps()
+    max_frames = comfyui_client.video_max_frames()
+    length = comfyui_client.frames_for_duration(seconds)
+    if seconds * fps > max_frames:
         logger.warning(
-            "video: 分镜时长 %.1fs 超出 LTX 单镜上限 %.1fs（COMFYUI_LTX_MAX_FRAMES=%d），"
+            "video: 分镜时长 %.1fs 超出单镜上限 %.1fs（后端 %s，MAX_FRAMES=%d），"
             "实际只生成 %.1fs，多出的配音只能靠降速/补帧吸收",
-            seconds, (max_frames - 1) / fps, max_frames, (max_frames - 1) / fps,
+            seconds, (max_frames - 1) / fps, comfyui_client.video_backend(),
+            max_frames, (max_frames - 1) / fps,
         )
-        length = max_frames
     return max(MIN_FRAMES, length)
 
 
@@ -353,7 +350,7 @@ def generate_frames(workspace: str | Path | None = None) -> dict:
 
 
 def generate_clips(workspace: str | Path | None = None) -> dict:
-    """阶段 2：把每个首帧图转为视频片段（ComfyUI LTX-Video 图生视频）。
+    """阶段 2：把每个首帧图转为视频片段（ComfyUI LTX-Video / MiniMax-H3 图生视频）。
 
     首帧图先逐个上传，然后整批工作流一次性提交给 ComfyUI，统一收集后
     对失败分镜重试。
@@ -385,7 +382,7 @@ def generate_clips(workspace: str | Path | None = None) -> dict:
             break
 
     def dest_of(shot: Shot) -> Path:
-        return ws / CLIPS_DIR / f"shot_{shot.id}.webm"
+        return ws / CLIPS_DIR / f"shot_{shot.id}{comfyui_client.clip_suffix()}"
 
     ok: dict[int, Path] = {}
     lengths: dict[int, int] = {}
@@ -404,9 +401,13 @@ def generate_clips(workspace: str | Path | None = None) -> dict:
 
     if pending:
         with ComfyUIClient() as client:
-            # 同上：按服务端实际模型列表校准 LTX checkpoint 文件名与 LoRA
-            ltx_checkpoint = client.resolve_checkpoint("ltx")
-            ltx_lora = client.resolve_lora("ltx")
+            # 同上：按服务端实际模型列表校准 LTX checkpoint 文件名与 LoRA；
+            # H3 后端用的是 UNETLoader + CLIPLoader(minimax)，没有 checkpoint 可校准
+            if comfyui_client.is_h3_backend():
+                ltx_checkpoint, ltx_lora = None, None
+            else:
+                ltx_checkpoint = client.resolve_checkpoint("ltx")
+                ltx_lora = client.resolve_lora("ltx")
             for attempt in range(_retries() + 1):
                 if not pending:
                     break
@@ -418,10 +419,10 @@ def generate_clips(workspace: str | Path | None = None) -> dict:
                     uploaded = client.upload_image(image_of[shot.id])
                     length = frames_for_duration(shot.duration_seconds)
                     lengths[shot.id] = length
-                    # 逐镜按首帧真实画幅换算 LTX 画布（32 倍数 + 显存预算），
-                    # 保证首帧不被 LTXVImgToVideo 裁切/挤压
+                    # 逐镜按首帧真实画幅换算视频画布（32 倍数 + 显存预算），
+                    # 保证首帧不被图生视频节点裁切/挤压
                     shot_w, shot_h = image_dimensions(image_of[shot.id]) or (frame_w, frame_h)
-                    width, height = resolve_ltx_size(shot_w, shot_h, ltx_checkpoint)
+                    width, height = resolve_video_size(shot_w, shot_h, ltx_checkpoint)
                     sizes[shot.id] = (width, height)
                     return build_i2v_workflow(
                         image_name=uploaded,
@@ -445,7 +446,12 @@ def generate_clips(workspace: str | Path | None = None) -> dict:
     entries: list[dict] = []
     for shot in sorted(storyboard.values(), key=lambda s: s.id):
         if shot.id in ok:
-            entry = _ok_entry(shot.id, "video", f"{CLIPS_DIR}/shot_{shot.id}.webm", ok[shot.id])
+            entry = _ok_entry(
+                shot.id,
+                "video",
+                f"{CLIPS_DIR}/shot_{shot.id}{comfyui_client.clip_suffix()}",
+                ok[shot.id],
+            )
             entry["length"] = lengths.get(shot.id)
             if shot.id in sizes:
                 entry["width"], entry["height"] = sizes[shot.id]
@@ -779,7 +785,7 @@ def sync_lips(workspace: str | Path | None = None) -> dict:
                 "id": shot_id,
                 "status": "failed",
                 "error": errors[shot_id],
-                "fallback": f"{CLIPS_DIR}/shot_{shot_id}.webm",
+                "fallback": f"{CLIPS_DIR}/shot_{shot_id}{comfyui_client.clip_suffix()}",
             })
         else:
             entries.append({"id": shot_id, "status": "skipped", "reason": skipped[shot_id]})
@@ -797,7 +803,7 @@ def sync_lips(workspace: str | Path | None = None) -> dict:
     if errors:
         summary["failed_shots"] = [
             {"id": shot_id, "error": error,
-             "fallback": f"{CLIPS_DIR}/shot_{shot_id}.webm"}
+             "fallback": f"{CLIPS_DIR}/shot_{shot_id}{comfyui_client.clip_suffix()}"}
             for shot_id, error in sorted(errors.items())
         ]
         logger.warning(

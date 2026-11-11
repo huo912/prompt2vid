@@ -34,11 +34,12 @@ def generate_frames() -> str:
 
 @tool("Generate video clips for all storyboard shots")
 def generate_clips() -> str:
-    """将每个分镜的首帧图转为视频片段（ComfyUI LTX-Video 图生视频）。
+    """将每个分镜的首帧图转为视频片段（ComfyUI LTX-Video / MiniMax-H3 图生视频）。
 
     自动读取 frames/manifest.json 与 storyboard.json，逐镜生成
-    clips/shot_<id>.webm，帧数按时长自动换算（8n+1），失败自动重试，
-    并写入 clips/manifest.json 清单。无需任何参数。
+    clips/shot_<id>.webm（LTX）或 clips/shot_<id>.mp4（H3），帧数按时长
+    自动换算（LTX 8n+1 / H3 17k+5），失败自动重试，并写入
+    clips/manifest.json 清单。无需任何参数。
 
     Returns:
         JSON 汇总：stage/total/succeeded/failed/manifest 及失败明细。
@@ -77,7 +78,7 @@ def text_to_image(
     return str(path.resolve())
 
 
-@tool("Image to video via ComfyUI LTX-Video")
+@tool("Image to video via ComfyUI (LTX-Video or MiniMax-H3)")
 def image_to_video(
     image_path: str,
     prompt: str,
@@ -85,19 +86,20 @@ def image_to_video(
     negative_prompt: str = "",
     width: int = 0,
     height: int = 0,
-    length: int = 41,
+    length: int = 0,
 ) -> str:
     """将首帧图转为视频片段（单镜原语，通常用 generate_clips 即可）。
 
     Args:
         image_path: 首帧图路径（本地文件，将自动上传到 ComfyUI）。
         prompt: 英文提示词 = 画面描述 + 运动描述（如 'autumn park, slow zoom in'）。
-        output_path: 视频保存路径（建议 .webm）。
-        negative_prompt: 负面提示词，留空使用环境默认。
+        output_path: 视频保存路径（LTX 建议 .webm，H3 建议 .mp4）。
+        negative_prompt: 负面提示词，留空使用环境默认（H3 后端不支持，会被忽略）。
         width: 视频宽度；0（默认）= 按首帧真实画幅自动推导 32 倍数分辨率，
             避免固定 512x768 把竖屏首帧裁变形。
         height: 视频高度；0（默认）= 自动推导。
-        length: 视频帧数（必须 8n+1；25fps 下 41 帧 ≈ 1.6s）。
+        length: 视频帧数；0（默认）= 按后端上限取默认值。必须落在后端的
+            帧数网格上（LTX 8n+1，H3 17k+5），传入值会自动吸附。
 
     Returns:
         保存后的视频绝对路径。

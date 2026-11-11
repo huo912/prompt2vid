@@ -113,11 +113,17 @@ git clone https://github.com/cubiq/ComfyUI_IPAdapter_plus.git
 > 像素预算保持 576x1024。本文第 1-6 节的标准档模型（SDXL Base + LTX 2B + T5）
 > 继续保留，旧文件不删。所有文件名均已对照 hf-mirror 仓库逐一核实。
 >
-> 档位切换：项目根目录已提供三份完整配置 `.env.4060` / `.env.4090` /
-> `.env.5090`（各含本节对应的模型清单与下载命令）。运行时用
+> 档位切换：项目根目录已提供多份完整配置 `.env.4060` / `.env.4090` /
+> `.env.4090-low` / `.env.minimax-h3.4090` / `.env.5090`（各含本节对应的
+> 模型清单与下载命令）。运行时用
 > `prompt2vid --env-file .env.5090 "描述"`（或简名 `--env-file 5090`）切换，
 > 不指定时默认 `.env`（本地 4060 档）；server/k8s 场景用环境变量
 > `PROMPT2VID_ENV_FILE=.env.5090` 或 `PROMPT2VID_PROFILE=5090`。
+>
+> **图生视频换 MiniMax-H3**：`.env.minimax-h3.4090` 在本节模型之外再挂一套
+> H3 权重（`COMFYUI_VIDEO_BACKEND=minimax_h3`），一次性下载用
+> `bash deploy/comfyui/download_minimax_h3_models.sh`；H3 与 LTX 共用
+> 文生图/TTS/口型同步链路，`--env-file minimax-h3.4090` 即可切回。
 
 ### 7.1 准备（一次性，云机 shell）
 
@@ -387,6 +393,7 @@ prompt2vid --check-only
 | `--check-only` 报模型不存在                     | 模型没下全或目录放错——对照 §一 总表 / §7.4 验证输出                                                                                       |
 | SaveWEBM 节点报错                               | 没装 `pip install av`（8.5 第 4 步）                                                                                                      |
 | LatentSync 报 `TorchCodec is required`          | torchaudio≥2.9 的 `save()`/`load()` 默认走 TorchCodec——云机跑 `deploy/comfyui/patch_latentsync_audio.py` 打补丁后重启（LOCAL_SETUP §8.3） |
+| LatentSync 报 `RuntimeError: Face not detected` | 逐帧 insightface 检测失败（单帧人脸 <50×80 像素 / 置信度 <0.5 / 长宽比出 0.2–1.5，或侧脸、糊、遮挡）。跑 `deploy/comfyui/patch_latentsync_face_detect.py` 打补丁：改成先用最近的有效帧补洞，只有整段视频一帧都检不到才报错 |
 | 云机 `python3: command not found`（退出码 127） | 非交互 SSH 不读 `.bashrc`，conda 不在 PATH——用绝对路径 `/root/miniconda3/bin/python3`                                                     |
 | 断开 SSH 后 ComfyUI 停了                        | 没用 nohup/tmux——按 8.7 第 4 步的命令启动                                                                                                 |
 
@@ -595,10 +602,12 @@ pip install -r ComfyUI-LatentSyncWrapper\requirements.txt # 首次运行自动�
 git clone https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite.git # 如未装
 
 cd /root/autodl-tmp/ComfyUI
-nohup python main.py --listen 127.0.0.1 --port 8188 > comfyui.log 2>&1 &
-tail -f comfyui.log
+nohup python main.py --listen 127.0.0.1 --port 8188 > comfyui.log 2>&1 & tail -f comfyui.log
 
-ssh -N -L 8188:127.0.0.1:8188 -p 28837 root@connect.westb.seetacloud.com
+ssh -N -L 8188:127.0.0.1:8188 -p 45335 root@connect.westb.seetacloud.com
+
+ssh
+
 # 密码 / 端口见 AutoDL 控制台「自定义服务」，勿写进仓库（或改用免密登录）
 
 source .venv/bin/activate
@@ -621,3 +630,5 @@ prompt2vid-server --env-file 4090-low
 玉帝听完汇报，沉默良久，最后长叹一声：“传朕旨意，以后凡间‘施工’二字，改名为‘养人’。另外，把二郎神的哮天犬调来沈阳，专门负责闻哪儿没挖开，就在那儿下嘴刨，以此以此解决天庭失业问题。”
 
 要求玉帝角色，和蔼可亲；哮天犬角色，调皮可爱；沈阳基建，奸诈狡猾，唯利是图。
+
+ssh -p 45335 root@connect.westb.seetacloud.com / 3HZNY0yoLxDB

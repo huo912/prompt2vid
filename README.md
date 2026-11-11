@@ -272,6 +272,18 @@ curl -X POST http://<pod-ip>:8081/a2a/jsonrpc \
 
 > 显存预算：RTX 4060 8GB 下，T5 必须使用 fp8 量化版（fp16 约 9GB+ 会 OOM）；`COMFYUI_T5_DEVICE=cpu` 可进一步把文本编码放到内存（64GB 宿主机内存充足）。
 
+> **MiniMax-H3 后端**（`COMFYUI_VIDEO_BACKEND=minimax_h3`，见 `.env.minimax-h3.4090`）
+> 的 6 个模型不在上表内，用仓库脚本一键下载（幂等、走 hf-mirror、
+> 自动软链进 ComfyUI 并校验完整性）：
+>
+> ```bash
+> COMFYUI_DIR=/root/autodl-tmp/ComfyUI \
+> P2V_H3_MODEL_ROOT=/autodl-fs/data/models \
+> bash deploy/comfyui/download_minimax_h3_models.sh
+> ```
+>
+> 清单与 4090 选型理由见 [.env.minimax-h3.4090](.env.minimax-h3.4090) 头部注释。
+
 > 可选增强（无需改动基础模型表）：**配音升级 IndexTTS-2.5**（约 12GB 显存）与**口型同步 LatentSync 1.6**（约 20GB 显存）各需在 ComfyUI 安装一个自定义节点并下载模型，安装命令见 [docs/LOCAL_SETUP.md](docs/LOCAL_SETUP.md) §配音升级 / §口型同步；未安装时配音走 edge-tts 回退链、口型同步自动跳过，流水线照常出片。
 
 ## 抖音开放平台凭据
@@ -286,14 +298,16 @@ curl -X POST http://<pod-ip>:8081/a2a/jsonrpc \
 
 见 [.env.example](.env.example)。要点：
 
-### 多 GPU 档位配置（4060 / 4090 / 5090）
+### 多 GPU 档位配置（4060 / 4090 / 5090 / 4090·H3）
 
-项目根目录提供三份完整档位配置，**每份都自带该档位的模型清单与下载命令**：
+项目根目录提供多份完整档位配置，**每份都自带该档位的模型清单与下载命令**：
 
 | 配置文件 | 显卡 | 模型组合 | 模型总量 |
 |----------|------|----------|----------|
 | `.env.4060` | 本地 4060（8GB） | SDXL Base + LTX 2B + 渲染放大到 720 宽 | 约 13.8GB |
 | `.env.4090` | 云机 4090（24GB） | RealVisXL V5 + LTX 13B fp8 + IPAdapter | 约 30.9GB |
+| `.env.4090-low` | 云机 4090 冒烟档 | 同 4090，首帧/视频画幅与步数压到下限，快速验证链路 | 同 4090 |
+| `.env.minimax-h3.4090` | 云机 4090（24GB） | 同 4090，图生视频换 **MiniMax-H3**（原生 24fps） | 约 76GB（含两套视频模型） |
 | `.env.5090` | 云机 5090（32GB） | 同 4090，T5 上 GPU、默认 720p 生成 | 约 30.9GB |
 
 > 各档位的画质参数依据与进一步调优（放大/补帧/超分/换底模）见
@@ -305,6 +319,7 @@ curl -X POST http://<pod-ip>:8081/a2a/jsonrpc \
 # CLI 指定配置文件（值可以是路径或档位简名）
 prompt2vid --env-file .env.4090 "做一个关于秋天的治愈系短视频"
 prompt2vid --env-file 4090 --check-only          # 简名写法，体检该档位
+prompt2vid --env-file minimax-h3.4090 "…"        # H3 后端档位（简名同样可用）
 
 # 环境变量（prompt2vid-server / k8s / systemd 场景）
 export PROMPT2VID_ENV_FILE=.env.4090              # 指定配置文件
@@ -321,7 +336,13 @@ export PROMPT2VID_PROFILE=4090                    # 或只给档位简名
 | `PROMPT2VID_LLM_BASE_URL` / `PROMPT2VID_LLM_API_KEY` | OpenAI 兼容网关地址与密钥 |
 | `PROMPT2VID_MODEL__SCRIPT_WRITER` | 按 agent 覆盖模型（agent 名大写、点换双下划线） |
 | `COMFYUI_URL` | ComfyUI 服务地址（本地默认 `http://127.0.0.1:8188`） |
-| `COMFYUI_T2I_CHECKPOINT` / `COMFYUI_LTX_CHECKPOINT` / `COMFYUI_T5` | ComfyUI 模型文件名（5090/24GB+ 建议 `ltxv-13b-0.9.7-distilled-fp8`；2B 档已回退兜底） |
+| `COMFYUI_T2I_CHECKPOINT` / `COMFYUI_LTX_CHECKPOINT` / `COMFYUI_T5` | ComfyUI 模型文件名（5090/24GB+ 建议 `ltxv-13b-0.9.7-dev-fp8`；2B 档已回退兜底） |
+| `COMFYUI_VIDEO_BACKEND` | 图生视频后端：`ltx`（默认）或 `minimax_h3`（别名 `h3` / `minimax-h3`）。切到 H3 后单镜产物是 mp4/h264、帧数按 17k+5 吸附、`COMFYUI_LTX_CHECKPOINT`/`T5` 不再需要 |
+| `COMFYUI_H3_UNET` / `COMFYUI_H3_CLIP` / `COMFYUI_H3_VIDEO_VAE` / `COMFYUI_H3_AUDIO_VAE` | H3 的扩散模型 / 文本编码器（CLIPLoader type 固定 `minimax`）/ 视频 VAE / 音频 VAE 文件名（默认即 4090 的 int8_convrot + nvfp4_awq 组合） |
+| `COMFYUI_H3_LORA` / `COMFYUI_H3_LORA_STRENGTH` | H3 turbo 加速 LoRA（默认 8 步版；留空则退回 30+ 步慢速采样）与权重 |
+| `COMFYUI_H3_STEPS` / `COMFYUI_H3_SAMPLER` / `COMFYUI_H3_SCHEDULER` | H3 采样参数（默认 8 / `res_multistep` / `simple`） |
+| `COMFYUI_H3_MAX_FRAMES` / `COMFYUI_H3_MAX_PIXELS` | H3 单镜帧数上限与单帧像素预算（默认 107 帧 ≈4.4s、`589824` 即 576x1024），24GB 卡按预算换画幅 |
+| `COMFYUI_H3_AUDIO` | 1 时额外解码 H3 原生音轨（默认关：流水线自带 TTS 配音，开了会抢声道） |
 | `PROMPT2VID_STYLE` | 全片固定风格（预设 `anime` 动漫 / `realistic` 写实，或字面英文提示词；留空关闭）。两层硬约束：分镜 LLM 的画面描述 + 每镜文生图/图生视频正负向提示词自动追加风格词与排斥词 |
 | `COMFYUI_T2I_LORA` / `COMFYUI_T2I_LORA_STRENGTH` | 文生图风格 LoRA（`models/loras/`，默认权重 0.8）；缺失时自动降级为无 LoRA 生成。各档位推荐：4060/SDXL Base → `anime.safetensors`（ntc-ai 滑块，权重 1.5）；4090/5090 → 同款 + 视频侧 `shinkai-anime-style-lora-v1_58000.safetensors`（下载命令见 `.env.<档位>` 头部） |
 | `COMFYUI_LTX_LORA` / `COMFYUI_LTX_LORA_STRENGTH` | LTX 图生视频风格 LoRA（`LoraLoaderModelOnly` 加载，LTX checkpoint 无 CLIP）；LTX 2B 无现成动漫 LoRA 留空，13B 档推荐新海诚风格 LoRA |

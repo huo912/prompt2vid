@@ -593,6 +593,19 @@ ImportError: TorchCodec is required for save_with_torchcodec.
 `nodes.py.bak-<时间戳>`，并会用 `[warn]` 标出同文件里其它仍需处理的
 `torchaudio.save/load` 调用。
 
+同一目录下还有 `deploy/comfyui/patch_latentsync_face_detect.py`，治另一种
+"整段失败"：`RuntimeError: Face not detected`。上游
+`lipsync_pipeline.affine_transform_video()` 会逐帧调 insightface，只要**某一帧**
+没检出合格人脸（<50×80 像素、置信度 <0.5、长宽比出 0.2–1.5，或侧脸/糊/遮挡）
+就整段抛错。补丁改成先探测全部帧，把失败的帧用**最近的有效帧**补位，只有
+整段一帧都检不到时才报错（并给出可操作提示：换首帧或 `PROMPT2VID_LIPSYNC=false`）。
+同样幂等、自动备份、写完做语法检查：
+
+```bash
+/root/miniconda3/bin/python3 deploy/comfyui/patch_latentsync_face_detect.py
+# 装到别处时用 --node-dir 指定 ComfyUI-LatentSyncWrapper 目录
+```
+
 #### 2）先摸清云机环境（每条都别跳过）
 
 ```bash

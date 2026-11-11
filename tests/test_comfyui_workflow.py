@@ -628,3 +628,104 @@ def test_lipsync_workflow_links_within_output_slots():
             src_id, slot = value
             src_class = wf[src_id]["class_type"]
             assert slot < _NODE_OUTPUT_SLOTS[src_class]
+
+
+# ---------------------------------------------------------------- H3 潜空间放大
+
+def _h3_env_clean(monkeypatch):
+    for name in (
+        "COMFYUI_H3_LATENT_UPSCALE",
+        "COMFYUI_H3_LATENT_UPSCALE_MODEL",
+        "COMFYUI_H3_UPSCALE_SHARPEN",
+        "COMFYUI_H3_UPSCALE_SHARPEN_RADIUS",
+        "COMFYUI_H3_UPSCALE_SHARPEN_SIGMA",
+        "COMFYUI_H3_LORA",
+        "COMFYUI_H3_AUDIO",
+        "COMFYUI_H3_MAX_FRAMES",
+        "COMFYUI_H3_WIDTH",
+        "COMFYUI_H3_HEIGHT",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+
+def test_h3_workflow_without_latent_upscale(monkeypatch):
+    from prompt2vid.comfyui_client import build_h3_i2v_workflow
+
+    _h3_env_clean(monkeypatch)
+    monkeypatch.setenv("COMFYUI_H3_LATENT_UPSCALE", "0")
+    monkeypatch.setenv("COMFYUI_H3_UPSCALE_SHARPEN", "0")
+
+    wf = build_h3_i2v_workflow("first.png", "a cat", width=576, height=1024, length=73, seed=1)
+
+    assert "upscale" not in wf
+    assert "latent_upscaler" not in wf
+    assert "sharpen" not in wf
+    assert wf["decode"]["inputs"]["samples"] == ["sample", 0]
+    assert wf["video"]["inputs"]["images"] == ["decode", 0]
+
+
+def test_h3_workflow_latent_upscale_doubles_and_links(monkeypatch):
+    from prompt2vid.comfyui_client import build_h3_i2v_workflow
+
+    _h3_env_clean(monkeypatch)
+    monkeypatch.setenv("COMFYUI_H3_LATENT_UPSCALE", "2")
+    monkeypatch.setenv("COMFYUI_H3_UPSCALE_SHARPEN", "0")
+
+    wf = build_h3_i2v_workflow("first.png", "a cat", width=576, height=1024, length=73, seed=1)
+
+    up = wf["upscale"]
+    assert up["class_type"] == "MiniMaxH3LatentUpscaleWithModel"
+    assert up["inputs"]["samples"] == ["sample", 0]
+    assert (up["inputs"]["width"], up["inputs"]["height"]) == (1152, 2048)
+    assert wf["latent_upscaler"]["class_type"] == "LatentUpscaleModelLoader"
+    assert wf["latent_upscaler"]["inputs"]["model_name"].endswith(".safetensors")
+    # 解码吃放大后的 latent；音频仍从原始 sample 解，不受影响
+    assert wf["decode"]["inputs"]["samples"] == ["upscale", 0]
+    assert wf["video"]["inputs"]["images"] == ["decode", 0]
+
+
+def test_h3_workflow_latent_upscale_size_stays_32_aligned(monkeypatch):
+    from prompt2vid.comfyui_client import build_h3_i2v_workflow
+
+    _h3_env_clean(monkeypatch)
+    monkeypatch.setenv("COMFYUI_H3_LATENT_UPSCALE", "1.5")
+    monkeypatch.setenv("COMFYUI_H3_UPSCALE_SHARPEN", "0")
+
+    wf = build_h3_i2v_workflow("first.png", "a cat", width=576, height=1024, length=73, seed=1)
+
+    up = wf["upscale"]["inputs"]
+    assert up["width"] % 32 == 0
+    assert up["height"] % 32 == 0
+    assert up["width"] == 864 and up["height"] == 1536
+
+
+def test_h3_workflow_sharpen_sits_between_decode_and_video(monkeypatch):
+    from prompt2vid.comfyui_client import build_h3_i2v_workflow
+
+    _h3_env_clean(monkeypatch)
+    monkeypatch.setenv("COMFYUI_H3_LATENT_UPSCALE", "2")
+    monkeypatch.setenv("COMFYUI_H3_UPSCALE_SHARPEN", "0.4")
+    monkeypatch.setenv("COMFYUI_H3_UPSCALE_SHARPEN_RADIUS", "1")
+    monkeypatch.setenv("COMFYUI_H3_UPSCALE_SHARPEN_SIGMA", "1.0")
+
+    wf = build_h3_i2v_workflow("first.png", "a cat", width=576, height=1024, length=73, seed=1)
+
+    sh = wf["sharpen"]
+    assert sh["class_type"] == "ImageSharpen"
+    assert sh["inputs"]["image"] == ["decode", 0]
+    assert sh["inputs"]["alpha"] == 0.4
+    assert wf["video"]["inputs"]["images"] == ["sharpen", 0]
+
+
+def test_h3_workflow_audio_still_decodes_from_raw_sample(monkeypatch):
+    from prompt2vid.comfyui_client import build_h3_i2v_workflow
+
+    _h3_env_clean(monkeypatch)
+    monkeypatch.setenv("COMFYUI_H3_LATENT_UPSCALE", "2")
+    monkeypatch.setenv("COMFYUI_H3_UPSCALE_SHARPEN", "0")
+    monkeypatch.setenv("COMFYUI_H3_AUDIO", "1")
+
+    wf = build_h3_i2v_workflow("first.png", "a cat", width=576, height=1024, length=73, seed=1)
+
+    assert wf["decode_audio"]["inputs"]["samples"] == ["sample", 0]
+    assert wf["video"]["inputs"]["audio"] == ["decode_audio", 0]

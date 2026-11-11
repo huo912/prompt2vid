@@ -34,13 +34,24 @@ import httpx
 
 from .comfyui_client import (
     DEFAULT_COMFYUI_URL,
+    DEFAULT_H3_AUDIO_VAE,
+    DEFAULT_H3_CLIP,
+    DEFAULT_H3_LORA,
+    DEFAULT_H3_UNET,
+    DEFAULT_H3_VIDEO_VAE,
     DEFAULT_LTX_CHECKPOINT,
     DEFAULT_T2I_CHECKPOINT,
     DEFAULT_T5,
+    H3_I2V_NODE,
+    UNET_LOADER,
+    VAE_LOADER,
     combo_values,
     env_str,
+    h3_max_pixels,
     ipadapter_enabled,
+    is_h3_backend,
     ltx_max_pixels,
+    video_backend,
 )
 from .ffmpeg_ops import resolve_tool
 from .style import style_enabled, style_name
@@ -105,8 +116,9 @@ def _append_gpu_checks(
 ) -> None:
     """GPU 显存与画质档位校对（全部非阻断：只提示，不拦截）。
 
-    显存决定 LTX 模型与分辨率预算：配置超出显卡能力会在生成阶段 OOM，
-    配置低于显卡能力则浪费画质。显存阈值按本项目三档（8/24/32GB）划分。
+    显存决定视频模型与分辨率预算：配置超出显卡能力会在生成阶段 OOM，
+    配置低于显卡能力则浪费画质。显存阈值按本项目三档（8/24/32GB）划分，
+    分辨率预算按当前后端（LTX COMFYUI_LTX_MAX_PIXELS / H3 COMFYUI_H3_MAX_PIXELS）读。
     """
     devices = system_stats.get("devices") or [] if isinstance(system_stats, dict) else []
     gpu = next((d for d in devices if isinstance(d, dict) and d.get("type") == "cuda"), None)
@@ -122,9 +134,10 @@ def _append_gpu_checks(
             required=False,
         )
     )
-    pixels = ltx_max_pixels(ltx_ckpt)
+    pixels = h3_max_pixels() if is_h3_backend() else ltx_max_pixels(ltx_ckpt)
+    pixels_env = "COMFYUI_H3_MAX_PIXELS" if is_h3_backend() else "COMFYUI_LTX_MAX_PIXELS"
     ltx_name = ltx_ckpt.lower()
-    if "13b" in ltx_name and vram_gb < 16:
+    if not is_h3_backend() and "13b" in ltx_name and vram_gb < 16:
         checks.append(
             Check(
                 name="档位校对：LTX 13B",
@@ -140,7 +153,7 @@ def _append_gpu_checks(
             Check(
                 name="档位校对：分辨率预算",
                 ok=False,
-                detail=f"COMFYUI_LTX_MAX_PIXELS={pixels}（720p 档）在 {vram_gb:.0f}GB 显存上偏激进，可能 OOM",
+                detail=f"{pixels_env}={pixels}（720p 档）在 {vram_gb:.0f}GB 显存上偏激进，可能 OOM",
                 hint="24GB 档建议 589824（约 576x1024）；OOM 后回调即可",
                 required=False,
             )
@@ -150,7 +163,7 @@ def _append_gpu_checks(
             Check(
                 name="档位校对：分辨率预算",
                 ok=True,
-                detail=f"显存富余（{vram_gb:.0f}GB），可把 COMFYUI_LTX_MAX_PIXELS 提到 921600 上 720p（约 704x1248）",
+                detail=f"显存富余（{vram_gb:.0f}GB），可把 {pixels_env} 提到 921600 上 720p（约 704x1248）",
                 required=False,
             )
         )
@@ -447,14 +460,31 @@ def check_environment(
                     required=lipsync_mode == "on",
                 ))
         try:
+            h3 = is_h3_backend()
             with httpx.Client(timeout=POLL_TIMEOUT, transport=transport) as client:
                 loader = _fetch_node_info(client, "CheckpointLoaderSimple", comfyui_url)
                 clip_loader = _fetch_node_info(client, "CLIPLoader", comfyui_url)
-                ltx_node = _fetch_node_info(client, "LTXVImgToVideo", comfyui_url)
-                save_webm = _fetch_node_info(client, "SaveWEBM", comfyui_url)
+                ltx_node = {} if h3 else _fetch_node_info(client, "LTXVImgToVideo", comfyui_url)
+                save_webm = {} if h3 else _fetch_node_info(client, "SaveWEBM", comfyui_url)
                 lora_loader = _fetch_node_info(client, "LoraLoader", comfyui_url)
                 lora_model_only = _fetch_node_info(
                     client, "LoraLoaderModelOnly", comfyui_url
+                )
+                unet_loader = (
+                    _fetch_node_info(client, UNET_LOADER, comfyui_url) if h3 else {}
+                )
+                vae_loader = (
+                    _fetch_node_info(client, VAE_LOADER, comfyui_url) if h3 else {}
+                )
+                h3_nodes = (
+                    {
+                        node: _fetch_node_info(client, node, comfyui_url)
+                        for node in (
+                            H3_I2V_NODE, "BasicGuider", "SamplerCustomAdvanced",
+                            "KSamplerSelect", "BasicScheduler", "CreateVideo", "SaveVideo",
+                        )
+                    }
+                    if h3 else {}
                 )
 
             ckpts = _combo_values(loader.get("CheckpointLoaderSimple", {}), "ckpt_name")
@@ -463,6 +493,8 @@ def check_environment(
             loras_model_only = _combo_values(
                 lora_model_only.get("LoraLoaderModelOnly", {}), "lora_name"
             )
+            unets = _combo_values(unet_loader.get(UNET_LOADER, {}), "unet_name")
+            vaes = _combo_values(vae_loader.get(VAE_LOADER, {}), "vae_name")
 
             checks.append(
                 Check(
@@ -472,30 +504,97 @@ def check_environment(
                     hint="把 SDXL checkpoint 放入 ComfyUI models/checkpoints/，或修改 .env 的 COMFYUI_T2I_CHECKPOINT",
                 )
             )
-            checks.append(
-                Check(
-                    name=f"LTX checkpoint（{ltx_ckpt}）",
-                    ok=ltx_ckpt in ckpts,
-                    detail=f"可用: {', '.join(ckpts[:5]) or '无'}",
-                    hint="把 LTX-Video checkpoint 放入 ComfyUI models/checkpoints/，或修改 .env 的 COMFYUI_LTX_CHECKPOINT",
+            if h3:
+                h3_unet = env_str("COMFYUI_H3_UNET", DEFAULT_H3_UNET)
+                h3_clip = env_str("COMFYUI_H3_CLIP", DEFAULT_H3_CLIP)
+                h3_video_vae = env_str("COMFYUI_H3_VIDEO_VAE", DEFAULT_H3_VIDEO_VAE)
+                h3_audio_vae = env_str("COMFYUI_H3_AUDIO_VAE", DEFAULT_H3_AUDIO_VAE)
+                checks.append(
+                    Check(
+                        name=f"H3 扩散模型（{h3_unet}）",
+                        ok=h3_unet in unets,
+                        detail=f"可用: {', '.join(unets[:5]) or '无'}",
+                        hint="运行 deploy/comfyui/download_minimax_h3_models.sh 自动下载并软链，"
+                             "或把 MiniMax-H3 扩散模型放入 ComfyUI models/diffusion_models/，"
+                             "或修改 .env 的 COMFYUI_H3_UNET",
+                    )
                 )
-            )
-            checks.append(
-                Check(
-                    name=f"T5 文本编码器（{t5}）",
-                    ok=t5 in clips,
-                    detail=f"可用: {', '.join(clips[:5]) or '无'}",
-                    hint="把 t5xxl fp8 放入 ComfyUI models/text_encoders/，或修改 .env 的 COMFYUI_T5",
+                checks.append(
+                    Check(
+                        name=f"H3 文本编码器（{h3_clip}）",
+                        ok=h3_clip in clips,
+                        detail=f"可用: {', '.join(clips[:5]) or '无'}",
+                        hint="把 qwen3vl_32b_minimax_h3 文本编码器放入 ComfyUI models/text_encoders/，"
+                             "或修改 .env 的 COMFYUI_H3_CLIP",
+                    )
                 )
-            )
-            checks.append(
-                Check(
-                    name="LTXV 节点",
-                    ok=bool(ltx_node) and bool(save_webm),
-                    detail="LTXVImgToVideo / SaveWEBM 已注册" if ltx_node and save_webm else "ComfyUI 缺少 LTXV 节点",
-                    hint="请升级 ComfyUI 到支持 LTX-Video 0.9.5 的版本（master）",
+                for name, value in (("H3 视频 VAE", h3_video_vae), ("H3 音频 VAE", h3_audio_vae)):
+                    checks.append(
+                        Check(
+                            name=f"{name}（{value}）",
+                            ok=value in vaes,
+                            detail=f"可用: {', '.join(vaes[:5]) or '无'}",
+                            hint="把 MiniMax-H3 的 VAE 放入 ComfyUI models/vae/，"
+                                 "或修改 .env 的 COMFYUI_H3_VIDEO_VAE / COMFYUI_H3_AUDIO_VAE",
+                        )
+                    )
+                missing_nodes = [node for node, spec in h3_nodes.items() if not spec]
+                checks.append(
+                    Check(
+                        name="MiniMax-H3 节点",
+                        ok=not missing_nodes,
+                        detail="H3 采样节点已注册" if not missing_nodes
+                               else "缺少节点: " + ", ".join(missing_nodes),
+                        hint="请升级 ComfyUI 到 0.30.0 以上（H3 支持），并确认 comfy_extras/nodes_minimax_h3.py 存在",
+                    )
                 )
-            )
+                h3_lora = env_str("COMFYUI_H3_LORA", DEFAULT_H3_LORA)
+                if h3_lora:
+                    checks.append(
+                        Check(
+                            name=f"H3 加速 LoRA（{h3_lora}）",
+                            ok=h3_lora in loras_model_only,
+                            detail=f"可用: {', '.join(loras_model_only[:5]) or '无'}",
+                            hint="把 fl2v turbo LoRA 放入 ComfyUI models/loras/，"
+                                 "或清空 .env 的 COMFYUI_H3_LORA（将退回 30+ 步慢速采样）",
+                            required=False,
+                        )
+                    )
+                checks.append(
+                    Check(
+                        name="视频后端",
+                        ok=True,
+                        detail=f"COMFYUI_VIDEO_BACKEND={video_backend()}（单镜片段为 mp4/h264）",
+                        required=False,
+                    )
+                )
+            else:
+                checks.append(
+                    Check(
+                        name=f"LTX checkpoint（{ltx_ckpt}）",
+                        ok=ltx_ckpt in ckpts,
+                        detail=f"可用: {', '.join(ckpts[:5]) or '无'}",
+                        hint="把 LTX-Video checkpoint 放入 ComfyUI models/checkpoints/，或修改 .env 的 COMFYUI_LTX_CHECKPOINT",
+                    )
+                )
+            if not h3:  # T5 只服务 LTX-Video，H3 后端用的是 Qwen3VL 文本编码器
+                checks.append(
+                    Check(
+                        name=f"T5 文本编码器（{t5}）",
+                        ok=t5 in clips,
+                        detail=f"可用: {', '.join(clips[:5]) or '无'}",
+                        hint="把 t5xxl fp8 放入 ComfyUI models/text_encoders/，或修改 .env 的 COMFYUI_T5",
+                    )
+                )
+            if not h3:
+                checks.append(
+                    Check(
+                        name="LTXV 节点",
+                        ok=bool(ltx_node) and bool(save_webm),
+                        detail="LTXVImgToVideo / SaveWEBM 已注册" if ltx_node and save_webm else "ComfyUI 缺少 LTXV 节点",
+                        hint="请升级 ComfyUI 到支持 LTX-Video 0.9.5 的版本（master）",
+                    )
+                )
             # LoRA 是风格增强件：缺失时运行期自动降级为无 LoRA 生成，
             # 只提示不拦截（风格词约束仍在，画面不会跑偏回默认风格）
             t2i_lora = env_str("COMFYUI_T2I_LORA", "")
@@ -510,7 +609,7 @@ def check_environment(
                     )
                 )
             ltx_lora = env_str("COMFYUI_LTX_LORA", "")
-            if ltx_lora:
+            if ltx_lora and not h3:
                 checks.append(
                     Check(
                         name=f"LTX LoRA（{ltx_lora}）",

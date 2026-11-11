@@ -91,6 +91,59 @@ def test_missing_models_reported_with_hints():
     assert all(c.hint for c in failures if "T5" in c.name or "checkpoint" in c.name)
 
 
+def test_h3_backend_ignores_ltx_assets(monkeypatch):
+    """H3 后端不跑 LTX：不检查 LTX checkpoint，也不要求 T5 文本编码器。"""
+    from prompt2vid import comfyui_client as cc
+
+    monkeypatch.setattr(
+        "prompt2vid.preflight.shutil.which", lambda name: f"/usr/bin/{name}"
+    )
+    monkeypatch.setenv("COMFYUI_VIDEO_BACKEND", "minimax_h3")
+    monkeypatch.setenv("COMFYUI_T2I_CHECKPOINT", "sd_xl_base_1.0.safetensors")
+    monkeypatch.setenv("COMFYUI_H3_UNET", cc.DEFAULT_H3_UNET)
+    monkeypatch.setenv("COMFYUI_H3_CLIP", cc.DEFAULT_H3_CLIP)
+    monkeypatch.setenv("COMFYUI_H3_VIDEO_VAE", cc.DEFAULT_H3_VIDEO_VAE)
+    monkeypatch.setenv("COMFYUI_H3_AUDIO_VAE", cc.DEFAULT_H3_AUDIO_VAE)
+    monkeypatch.setenv("COMFYUI_H3_LORA", cc.DEFAULT_H3_LORA)
+    monkeypatch.setenv("PROMPT2VID_LIPSYNC", "off")
+
+    combos = {
+        "CheckpointLoaderSimple": ("ckpt_name", ["sd_xl_base_1.0.safetensors"]),
+        "CLIPLoader": ("clip_name", [cc.DEFAULT_H3_CLIP]),
+        cc.UNET_LOADER: ("unet_name", [cc.DEFAULT_H3_UNET]),
+        cc.VAE_LOADER: ("vae_name", [cc.DEFAULT_H3_VIDEO_VAE, cc.DEFAULT_H3_AUDIO_VAE]),
+        "LoraLoader": ("lora_name", []),
+        "LoraLoaderModelOnly": ("lora_name", [cc.DEFAULT_H3_LORA]),
+    }
+    empty_nodes = {
+        cc.H3_I2V_NODE, "BasicGuider", "SamplerCustomAdvanced",
+        "KSamplerSelect", "BasicScheduler", "CreateVideo", "SaveVideo",
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/system_stats":
+            return httpx.Response(200, json={"system": {}})
+        if path.startswith("/object_info/"):
+            node = path.rsplit("/", 1)[1]
+            if node in combos:
+                field, values = combos[node]
+                return httpx.Response(200, json={
+                    node: {"input": {"required": {field: values}}}
+                })
+            if node in empty_nodes:
+                return httpx.Response(200, json={node: {"input": {"required": {}}}})
+        return httpx.Response(404)
+
+    result = preflight.check_environment(
+        base_url="http://comfyui.test", transport=_transport(handler)
+    )
+    assert result.passed, result.format_report()
+    names = [c.name for c in result.checks]
+    assert any("H3" in n for n in names)
+    assert not any("LTX" in n or "T5" in n for n in names)
+
+
 def test_combo_values_supports_dict_format():
     """新版 ComfyUI 的 combo 候选可能是 {value: [...]} 格式。"""
     spec = {"input": {"ckpt_name": {"value": ["a.safetensors"], "tooltip": "x"}}}

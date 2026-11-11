@@ -152,6 +152,178 @@ def ltx_clip_seconds() -> float:
     """LTX 单镜能生成的最长秒数（帧数上限 ÷ 帧率，默认约 10.2s）。"""
     return (ltx_max_frames() - 1) / ltx_fps()
 
+
+# ---------------------------------------------------------------------------
+# 图生视频后端：LTX-Video（默认）与 MiniMax-H3
+#
+# H3 与 LTX 的硬约束完全不同，所以帧网格、帧率、画布预算、工作流、输出
+# 容器都按后端切换：COMFYUI_VIDEO_BACKEND=ltx|minimax_h3。
+# H3 约束来自 comfy_extras/nodes_minimax_h3.py 与 ComfyUI 官方模板
+# video_minimax_h3_i2v.json：短边原生 768、上限 768x1344、宽高为 32 倍数、
+# 帧数走 17k+5 网格、固定 24fps；模型同时生成视频与音频。
+# ---------------------------------------------------------------------------
+VIDEO_BACKEND_LTX = "ltx"
+VIDEO_BACKEND_H3 = "minimax_h3"
+DEFAULT_VIDEO_BACKEND = VIDEO_BACKEND_LTX
+
+H3_FPS = 24.0
+H3_SIZE_MULTIPLE = 32
+H3_NATIVE_MAX_PIXELS = 768 * 1344  # 官方 768p 上限
+H3_FRAME_STEP = 17
+H3_FRAME_OFFSET = 5
+MIN_H3_FRAMES = H3_FRAME_OFFSET + H3_FRAME_STEP  # 22 = 17*1+5
+H3_TRAINED_MAX_FRAMES = 362  # 模型卡：训练范围约 124-362 帧（5-15s）
+# 单镜长度上限（17k+5）：107 帧 ≈ 4.4s。24GB 档单镜再长会吃满显存，
+# 分镜表按这个上限切镜，多出来的配音由剪辑阶段的降速/补帧吸收。
+DEFAULT_H3_MAX_FRAMES = 107
+# 24GB 档的画布预算：与 COMFYUI_T2I 的 576x1024 同尺寸，不做多余缩放。
+DEFAULT_H3_MAX_PIXELS = 576 * 1024
+
+DEFAULT_H3_UNET = "minimax_h3_fl2va_pruned_int8_convrot.safetensors"
+DEFAULT_H3_CLIP = "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors"
+DEFAULT_H3_VIDEO_VAE = "minimax_h3_video_vae_int8_convrot.safetensors"
+DEFAULT_H3_AUDIO_VAE = "minimax_h3_audio_vae_fp32.safetensors"
+# turbo 蒸馏 LoRA：8 步版本质量更稳，4 步版本（768p）更快
+DEFAULT_H3_LORA = "minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors"
+DEFAULT_H3_STEPS = 8
+DEFAULT_H3_SAMPLER = "res_multistep"
+DEFAULT_H3_SCHEDULER = "simple"
+
+UNET_LOADER = "UNETLoader"
+VAE_LOADER = "VAELoader"
+H3_I2V_NODE = "MiniMaxH3ImageToVideo"
+# ComfyUI 核心节点（comfy_extras/nodes_minimax_h3.py / nodes_hunyuan.py）
+H3_LATENT_UPSCALE_NODE = "MiniMaxH3LatentUpscaleWithModel"
+LATENT_UPSCALE_LOADER = "LatentUpscaleModelLoader"
+# 3D 卷积版在 2x/2.25x/2.5x/4x 上比 2D 版更准，正好覆盖默认 2 倍
+DEFAULT_H3_LATENT_UPSCALE_MODEL = "minimax_h3_latent_upscaler_3d_conv_v1_bf16.safetensors"
+
+
+def video_backend() -> str:
+    """图生视频后端（COMFYUI_VIDEO_BACKEND，默认 ltx；未知值回退 ltx）。"""
+    name = env_str("COMFYUI_VIDEO_BACKEND", DEFAULT_VIDEO_BACKEND).strip().lower()
+    if name.replace("-", "_") in ("minimax_h3", "h3"):
+        return VIDEO_BACKEND_H3
+    return VIDEO_BACKEND_LTX
+
+
+def is_h3_backend() -> bool:
+    return video_backend() == VIDEO_BACKEND_H3
+
+
+def video_fps() -> float:
+    """视频输出的帧率：H3 固定 24fps（模型约束），LTX 读 COMFYUI_LTX_FPS。"""
+    return H3_FPS if is_h3_backend() else ltx_fps()
+
+
+def h3_max_frames() -> int:
+    """H3 单镜帧数上限（COMFYUI_H3_MAX_FRAMES，按 17k+5 归一）。"""
+    frames = env_int("COMFYUI_H3_MAX_FRAMES", DEFAULT_H3_MAX_FRAMES)
+    frames = min(max(MIN_H3_FRAMES, frames), H3_TRAINED_MAX_FRAMES)
+    return H3_FRAME_STEP * math.ceil((frames - H3_FRAME_OFFSET) / H3_FRAME_STEP) + H3_FRAME_OFFSET
+
+
+def snap_h3_frames(length: int) -> int:
+    """把任意帧数吸附到 H3 的 17k+5 网格（向上取整，不缺帧）。"""
+    length = max(MIN_H3_FRAMES, int(length))
+    blocks = math.ceil((length - H3_FRAME_OFFSET) / H3_FRAME_STEP)
+    return H3_FRAME_STEP * blocks + H3_FRAME_OFFSET
+
+
+def video_max_frames() -> int:
+    """当前后端的单镜帧数上限（已按各自网格归一）。"""
+    return h3_max_frames() if is_h3_backend() else ltx_max_frames()
+
+
+def video_clip_seconds() -> float:
+    """当前后端单镜能生成的最长秒数（帧数上限 ÷ 帧率）。"""
+    if is_h3_backend():
+        return h3_max_frames() / H3_FPS
+    return ltx_clip_seconds()
+
+
+def frames_for_duration(seconds: float) -> int:
+    """把镜头时长换算成当前后端可用的帧数（LTX 8n+1 / H3 17k+5）。"""
+    fps = video_fps()
+    max_frames = video_max_frames()
+    if is_h3_backend():
+        target = max(MIN_H3_FRAMES, math.ceil(seconds * fps))
+        length = snap_h3_frames(target)
+    else:
+        target = max(MIN_LTX_FRAMES, math.ceil(seconds * fps))
+        length = 8 * math.ceil((target - 1) / 8) + 1
+    return min(length, max_frames)
+
+
+def clip_suffix() -> str:
+    """单镜片段的容器后缀：H3 出 mp4（h264），LTX 出 webm（vp9）。"""
+    return ".mp4" if is_h3_backend() else ".webm"
+
+
+def h3_max_pixels() -> int:
+    """H3 单帧像素预算（COMFYUI_H3_MAX_PIXELS，默认 576x1024）。"""
+    override = env_int("COMFYUI_H3_MAX_PIXELS", 0)
+    budget = override if override > 0 else DEFAULT_H3_MAX_PIXELS
+    return min(budget, H3_NATIVE_MAX_PIXELS)
+
+
+def fit_h3_size(width: int, height: int, max_pixels: int | None = None) -> tuple[int, int]:
+    """把首帧画幅换算成 H3 画布：32 倍数、保持宽高比、像素数贴近预算。
+
+    与 LTX 不同，H3 允许上采样画布：它是"图生视频"，首帧只作条件输入，
+    生成分辨率由画布决定，放大画布等于让模型按更高分辨率重绘，不会像
+    像素级上采样那样糊。
+    """
+    width = max(H3_SIZE_MULTIPLE, int(width))
+    height = max(H3_SIZE_MULTIPLE, int(height))
+    budget = max(
+        H3_SIZE_MULTIPLE * H3_SIZE_MULTIPLE,
+        int(max_pixels or h3_max_pixels()),
+    )
+    ratio = width / height
+    # 在预算内枚举高度候选（32 倍数），按"宽高比误差 + 画布利用率"打分：
+    # 单纯按 sqrt(budget*ratio) 取整，在 16:9 上会算出 1.82:1 这类被压扁的画布
+    best: tuple[float, int, int] | None = None
+    max_h = max(H3_SIZE_MULTIPLE, int(math.sqrt(budget / ratio)) * 2)
+    for candidate_h in range(H3_SIZE_MULTIPLE, max_h + 1, H3_SIZE_MULTIPLE):
+        snapped = _snap_multiple(ratio * candidate_h)
+        for candidate_w in (snapped, snapped + H3_SIZE_MULTIPLE):
+            if candidate_w * candidate_h > budget:
+                continue
+            aspect_error = abs(math.log((candidate_w / candidate_h) / ratio))
+            fill = candidate_w * candidate_h / budget
+            score = aspect_error + 0.05 * (1.0 - fill)
+            if best is None or score < best[0]:
+                best = (score, candidate_w, candidate_h)
+    if best is not None:
+        return best[1], best[2]
+    side = _snap_multiple(math.sqrt(budget))
+    return side, side
+
+
+def resolve_h3_size(width: int, height: int) -> tuple[int, int]:
+    """把首帧尺寸换算为 H3 画布；显式 COMFYUI_H3_WIDTH/HEIGHT 时直接采用。"""
+    env_w = env_int("COMFYUI_H3_WIDTH", 0)
+    env_h = env_int("COMFYUI_H3_HEIGHT", 0)
+    if env_w > 0 and env_h > 0:
+        return (_snap_multiple(env_w), _snap_multiple(env_h))
+    return fit_h3_size(width, height)
+
+
+def resolve_video_size(
+    width: int, height: int, checkpoint: str | None = None
+) -> tuple[int, int]:
+    """按当前后端把首帧尺寸换算成视频画布（stages 与工具层统一入口）。"""
+    if is_h3_backend():
+        return resolve_h3_size(width, height)
+    return resolve_ltx_size(width, height, checkpoint)
+
+
+def default_video_size(checkpoint: str | None = None) -> tuple[int, int]:
+    """不传首帧尺寸时，按文生图画幅推导视频画布。"""
+    width, height = default_t2i_size()
+    return resolve_video_size(width, height, checkpoint)
+
 # 种子计数器：PROMPT2VID_SEED 固定后，逐次 +1 保证分镜间种子不同但整跑可复现
 _SEED_COUNTER = itertools.count()
 
@@ -891,18 +1063,237 @@ def _apply_ipadapter(
     return ["ref_apply", 0]
 
 
+def build_h3_i2v_workflow(
+    image_name: str,
+    prompt: str,
+    width: int | None = None,
+    height: int | None = None,
+    length: int | None = None,
+    seed: int | None = None,
+    unet: str | None = None,
+    clip: str | None = None,
+    video_vae: str | None = None,
+    audio_vae: str | None = None,
+    lora: str | None = None,
+    fps: float | None = None,
+) -> dict[str, Any]:
+    """MiniMax-H3 图生视频工作流（API 格式，COMFYUI_VIDEO_BACKEND=minimax_h3）。
+
+    节点链（对照 ComfyUI 官方模板 video_minimax_h3_i2v.json 的
+    "Image to Video (MiniMax H3)" 子图）：
+    UNETLoader(diffusion_models) → [LoraLoaderModelOnly(turbo)] 提供 MODEL；
+    CLIPLoader(type=minimax) 提供 CLIP；两个 VAELoader 分别是画面/音频 VAE；
+    LoadImage(首帧) → MiniMaxH3ImageToVideo(clip, vae, prompt, 画布, 帧数,
+    first_frame) → CONDITIONING + LATENT；
+    BasicGuider + RandomNoise + KSamplerSelect(res_multistep) +
+    BasicScheduler(simple, N 步) → SamplerCustomAdvanced；
+    [LatentUpscaleModelLoader → MiniMaxH3LatentUpscaleWithModel]
+    VAEDecode → [ImageSharpen] → [VAEDecodeAudio] → CreateVideo(24fps) → SaveVideo。
+
+    H3 是视频+音频联合模型（节点没有负向提示词输入）：正向提示词里可以
+    直接描述台词/音效/音乐，但流水线仍会在配音阶段用 TTS 覆盖音轨，所以
+    默认不接音频解码（COMFYUI_H3_AUDIO=1 时才产出带原生音频的片段）。
+
+    Args:
+        width/height: 不传时读 COMFYUI_H3_WIDTH/HEIGHT，再退到按首帧画幅
+            换算（32 倍数 + 像素预算）。
+        length: 必须落在 17k+5 网格上；不传时取 COMFYUI_H3_MAX_FRAMES，
+            传入值会被自动吸附到网格。
+        unet/clip/video_vae/audio_vae: 覆盖 COMFYUI_H3_UNET / COMFYUI_H3_CLIP /
+            COMFYUI_H3_VIDEO_VAE / COMFYUI_H3_AUDIO_VAE。
+        lora: 覆盖 COMFYUI_H3_LORA（空串 = 不挂 turbo LoRA，需要 30+ 步）。
+        fps: 覆盖 H3_FPS（24，模型约束，一般不要改）。
+
+    低分辨率生成再潜空间放大（治"视频模糊"）：
+        COMFYUI_H3_LATENT_UPSCALE=2 → 采样完的 LATENT 直接过 H3 潜空间放大
+        模型出 2 倍分辨率，避开了"VAE 解码 → 像素放大 → 重新编码"那次往返。
+        COMFYUI_H3_UPSCALE_SHARPEN=0.5 → 解码后再走核心 ImageSharpen 轻锐化。
+    """
+    unet_name = unet or env_str("COMFYUI_H3_UNET", DEFAULT_H3_UNET)
+    clip_name = clip or env_str("COMFYUI_H3_CLIP", DEFAULT_H3_CLIP)
+    video_vae_name = video_vae or env_str("COMFYUI_H3_VIDEO_VAE", DEFAULT_H3_VIDEO_VAE)
+    audio_vae_name = audio_vae or env_str("COMFYUI_H3_AUDIO_VAE", DEFAULT_H3_AUDIO_VAE)
+    lora_name = lora if lora is not None else env_str("COMFYUI_H3_LORA", DEFAULT_H3_LORA)
+    fps_value = H3_FPS if fps is None else float(fps)
+    if width is None or height is None:
+        default_width, default_height = default_video_size()
+        width = default_width if width is None else width
+        height = default_height if height is None else height
+    width = max(H3_SIZE_MULTIPLE, _snap_multiple(width))
+    height = max(H3_SIZE_MULTIPLE, _snap_multiple(height))
+    frames = snap_h3_frames(
+        length if length is not None else env_int("COMFYUI_H3_MAX_FRAMES", DEFAULT_H3_MAX_FRAMES)
+    )
+    steps = env_int("COMFYUI_H3_STEPS", DEFAULT_H3_STEPS)
+    sampler_name = env_str("COMFYUI_H3_SAMPLER", DEFAULT_H3_SAMPLER)
+    scheduler = env_str("COMFYUI_H3_SCHEDULER", DEFAULT_H3_SCHEDULER)
+    with_audio = env_str("COMFYUI_H3_AUDIO", "0").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+    styled_prompt = apply_style(prompt)
+
+    model_src: list[Any] = ["unet", 0]
+    workflow: dict[str, Any] = {
+        "unet": {
+            "class_type": UNET_LOADER,
+            "inputs": {"unet_name": unet_name, "weight_dtype": "default"},
+        },
+        # H3 的文本编码器是 Qwen3-VL，CLIPLoader 的 type 必须是 minimax
+        "clip": {
+            "class_type": "CLIPLoader",
+            "inputs": {
+                "clip_name": clip_name,
+                "type": "minimax",
+                "device": env_str("COMFYUI_H3_CLIP_DEVICE", "default"),
+            },
+        },
+        "vae_video": {
+            "class_type": VAE_LOADER,
+            "inputs": {"vae_name": video_vae_name},
+        },
+        "vae_audio": {
+            "class_type": VAE_LOADER,
+            "inputs": {"vae_name": audio_vae_name},
+        },
+        "image": {
+            "class_type": "LoadImage",
+            "inputs": {"image": image_name},
+        },
+        "i2v": {
+            "class_type": H3_I2V_NODE,
+            "inputs": {
+                "clip": ["clip", 0],
+                "vae": ["vae_video", 0],
+                "prompt": styled_prompt,
+                "width": width,
+                "height": height,
+                "length": frames,
+                "first_frame": ["image", 0],
+            },
+        },
+        "guider": {
+            "class_type": "BasicGuider",
+            "inputs": {"model": model_src, "conditioning": ["i2v", 0]},
+        },
+        "noise": {
+            "class_type": "RandomNoise",
+            "inputs": {"noise_seed": seed if seed is not None else next_seed()},
+        },
+        "sampler": {
+            "class_type": "KSamplerSelect",
+            "inputs": {"sampler_name": sampler_name},
+        },
+        "sigmas": {
+            "class_type": "BasicScheduler",
+            "inputs": {
+                "model": model_src,
+                "scheduler": scheduler,
+                "steps": steps,
+                "denoise": 1.0,
+            },
+        },
+        "sample": {
+            "class_type": "SamplerCustomAdvanced",
+            "inputs": {
+                "noise": ["noise", 0],
+                "guider": ["guider", 0],
+                "sampler": ["sampler", 0],
+                "sigmas": ["sigmas", 0],
+                "latent_image": ["i2v", 1],
+            },
+        },
+        "decode": {
+            "class_type": "VAEDecode",
+            "inputs": {"samples": ["sample", 0], "vae": ["vae_video", 0]},
+        },
+    }
+    if lora_name:
+        workflow["lora"] = {
+            "class_type": LORA_MODEL_ONLY_LOADER,
+            "inputs": {
+                "model": ["unet", 0],
+                "lora_name": lora_name,
+                "strength_model": env_float("COMFYUI_H3_LORA_STRENGTH", 1.0),
+            },
+        }
+        model_src = ["lora", 0]
+        # guider/sigmas 引用 model_src，必须在插入 LoRA 后重指
+        workflow["guider"]["inputs"]["model"] = model_src
+        workflow["sigmas"]["inputs"]["model"] = model_src
+
+    # 低分生成 → 潜空间放大：采样结果直接在 latent 域 2 倍放大，跳过
+    # “VAE 解码 → 像素放大 → 重新编码”那次往返，画质损失小得多。
+    latent_upscale = env_float("COMFYUI_H3_LATENT_UPSCALE", 0.0)
+    if latent_upscale > 1.0:
+        workflow["latent_upscaler"] = {
+            "class_type": LATENT_UPSCALE_LOADER,
+            "inputs": {
+                "model_name": env_str(
+                    "COMFYUI_H3_LATENT_UPSCALE_MODEL", DEFAULT_H3_LATENT_UPSCALE_MODEL
+                )
+            },
+        }
+        workflow["upscale"] = {
+            "class_type": H3_LATENT_UPSCALE_NODE,
+            "inputs": {
+                "model": ["latent_upscaler", 0],
+                "samples": ["sample", 0],
+                # 节点内部按 (height//16, width//16) 建 latent，必须 32 对齐
+                "width": max(H3_SIZE_MULTIPLE, _snap_multiple(width * latent_upscale)),
+                "height": max(H3_SIZE_MULTIPLE, _snap_multiple(height * latent_upscale)),
+            },
+        }
+        workflow["decode"]["inputs"]["samples"] = ["upscale", 0]
+
+    image_src: list[Any] = ["decode", 0]
+    sharpen_alpha = env_float("COMFYUI_H3_UPSCALE_SHARPEN", 0.0)
+    if sharpen_alpha > 0.0:
+        workflow["sharpen"] = {
+            "class_type": "ImageSharpen",
+            "inputs": {
+                "image": image_src,
+                "sharpen_radius": env_int("COMFYUI_H3_UPSCALE_SHARPEN_RADIUS", 1),
+                "sigma": env_float("COMFYUI_H3_UPSCALE_SHARPEN_SIGMA", 1.0),
+                "alpha": sharpen_alpha,
+            },
+        }
+        image_src = ["sharpen", 0]
+
+    video_inputs: dict[str, Any] = {"images": image_src, "fps": fps_value}
+    if with_audio:
+        workflow["decode_audio"] = {
+            "class_type": "VAEDecodeAudio",
+            "inputs": {"samples": ["sample", 0], "vae": ["vae_audio", 0]},
+        }
+        video_inputs["audio"] = ["decode_audio", 0]
+    workflow["video"] = {"class_type": "CreateVideo", "inputs": video_inputs}
+    workflow["save"] = {
+        "class_type": "SaveVideo",
+        "inputs": {
+            "video": ["video", 0],
+            "filename_prefix": env_str("COMFYUI_H3_FILENAME_PREFIX", "video/prompt2vid_h3"),
+            "format": env_str("COMFYUI_H3_VIDEO_FORMAT", "mp4"),
+            "codec": env_str("COMFYUI_H3_VIDEO_CODEC", "h264"),
+        },
+    }
+    return workflow
+
+
 def build_i2v_workflow(
     image_name: str,
     prompt: str,
     negative_prompt: str = "",
     width: int | None = None,
     height: int | None = None,
-    length: int = 41,
+    length: int | None = None,
     seed: int | None = None,
     checkpoint: str | None = None,
     lora: str | None = None,
 ) -> dict[str, Any]:
-    """LTX-Video 图生视频工作流（API 格式）。
+    """图生视频工作流（API 格式），按 COMFYUI_VIDEO_BACKEND 分派。
+
+    后端 ltx（默认）→ LTX-Video；后端 minimax_h3 → MiniMax-H3
+    （见 build_h3_i2v_workflow，checkpoint/lora 两个 LTX 专用参数被忽略）。
 
     节点链（对照官方 ltxv_image_to_video_simple.0.9.5.json）：
     CLIPLoader(T5) → CLIPTextEncode(正/负) → LTXVImgToVideo → LTXVConditioning →
@@ -927,6 +1318,15 @@ def build_i2v_workflow(
     正向词、负向提示词自动追加风格排斥词——视频风格跟随首帧之余，
     提示词层再钉一次风格。
     """
+    if is_h3_backend():
+        return build_h3_i2v_workflow(
+            image_name=image_name,
+            prompt=prompt,
+            width=width,
+            height=height,
+            length=length,
+            seed=seed,
+        )
     ltx_ckpt = checkpoint or env_str("COMFYUI_LTX_CHECKPOINT", DEFAULT_LTX_CHECKPOINT)
     if width is None or height is None:
         default_width, default_height = default_ltx_size(ltx_ckpt)
@@ -939,6 +1339,10 @@ def build_i2v_workflow(
     t5 = env_str("COMFYUI_T5", DEFAULT_T5)
     t5_device = env_str("COMFYUI_T5_DEVICE", DEFAULT_T5_DEVICE)
     styled_prompt = apply_style(prompt)
+    # length 为 None 时取 LTX 默认 41 帧（≈1.6s @25fps）；传入值吸附到
+    # 8n+1 网格，避免 LTXVImgToVideo 因帧数不合法被预校验拒绝
+    frames = max(9, length or 41)
+    frames = 8 * math.ceil((frames - 1) / 8) + 1
     negative = negative_prompt or env_str("COMFYUI_LTX_NEGATIVE_PROMPT", DEFAULT_LTX_NEGATIVE)
     negative = apply_style_negative(negative)
     # LoRA 只接 MODEL（LTX checkpoint 的 CLIP 输出为空，接 LoraLoader 会
@@ -988,7 +1392,7 @@ def build_i2v_workflow(
                 "image": ["82", 0],
                 "width": width,
                 "height": height,
-                "length": length,
+                "length": frames,
                 "batch_size": 1,
                 "strength": 1.0,
             },
@@ -1110,15 +1514,16 @@ def run_image_to_video(
     negative_prompt: str = "",
     width: int | None = None,
     height: int | None = None,
-    length: int = 41,
+    length: int | None = None,
     seed: int | None = None,
     client: ComfyUIClient | None = None,
     checkpoint: str | None = None,
     lora: str | None = None,
 ) -> Path:
-    """LTX-Video 图生视频：把首帧图转为视频片段并保存到 dest。
+    """图生视频（后端见 COMFYUI_VIDEO_BACKEND）：首帧图 → 视频片段 → dest。
 
-    首帧图会自动上传到 ComfyUI。length 必须满足 8n+1（LTX 约束）；
+    首帧图会自动上传到 ComfyUI。length 必须落在后端的帧网格上（LTX
+    8n+1，H3 17k+5；两者都会自动吸附），传 None/0 表示用后端默认帧数；
     width/height 不传时会读取首帧真实宽高，换算成 32 倍数且符合显存
     预算的画幅，避免画幅不一致导致人物变形。
     """
@@ -1128,7 +1533,7 @@ def run_image_to_video(
     if width is None or height is None:
         frame_size = image_dimensions(image)
         frame_w, frame_h = frame_size or default_t2i_size()
-        resolved_w, resolved_h = resolve_ltx_size(frame_w, frame_h, checkpoint)
+        resolved_w, resolved_h = resolve_video_size(frame_w, frame_h, checkpoint)
         width = resolved_w if width is None else width
         height = resolved_h if height is None else height
     client = client or ComfyUIClient()
@@ -1139,7 +1544,7 @@ def run_image_to_video(
         negative_prompt=negative_prompt,
         width=width,
         height=height,
-        length=length,
+        length=length if length and length > 0 else None,
         seed=seed,
         checkpoint=checkpoint,
         lora=lora,
