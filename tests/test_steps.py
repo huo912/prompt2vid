@@ -308,6 +308,25 @@ def test_step_statuses_stale_running_marked_interrupted(tmp_path):
     assert statuses["generate_images"]["status"] == "running"
 
 
+def test_step_statuses_stale_running_with_artifact_is_done(tmp_path):
+    # 服务里那一步没来得及写状态，之后用 prompt2vid --resume 补跑成功
+    # → 产物已落盘，不该再显示 interrupted
+    (tmp_path / steps.STEPS_FILE).write_text(
+        json.dumps(
+            {"generate_images": {"status": "running", "error": "旧错误"}}
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "frames").mkdir()
+    (tmp_path / "frames" / "manifest.json").write_text("{}", encoding="utf-8")
+
+    statuses = steps.step_statuses(tmp_path, active=False)
+    assert statuses["generate_images"]["status"] == "done"
+    assert "error" not in statuses["generate_images"]
+    # 正在执行且产物已存在时仍保持 running
+    assert steps.step_statuses(tmp_path, active=True)["generate_images"]["status"] == "running"
+
+
 def test_write_and_read_meta(tmp_path):
     steps.write_meta(tmp_path, "第一句话")
     steps.write_meta(tmp_path, "第二句话")

@@ -240,7 +240,9 @@ def step_statuses(
 
     steps.json 的记录优先；没有记录但产物已存在的步骤视为 done
     （CLI 全流程跑出的历史 run 也能识别）；active=False 时残留的
-    running 状态视为 interrupted（服务重启/进程退出导致的中断）。
+    running 状态视为 interrupted（服务重启/进程退出导致的中断）——
+    除非产物已落盘，那说明服务里那一步没来得及写状态，实际是
+    ``run_resume`` 补跑成功的，仍算 done。
     """
     run_dir = Path(run_dir)
     states = _load_states(run_dir)
@@ -249,13 +251,20 @@ def step_statuses(
         sid = step["id"]
         entry = dict(states.get(sid, {}))
         status = entry.get("status")
+        artifact_done = bool(
+            step["artifact"] and (run_dir / step["artifact"]).is_file()
+        )
         if status == "running" and not active:
-            entry["status"] = "interrupted"
-            entry.setdefault("error", "执行中断（服务重启或进程退出）")
-        if status is None and step["artifact"]:
-            if (run_dir / step["artifact"]).is_file():
+            if artifact_done:
                 entry["status"] = "done"
-                entry.setdefault("summary", "产物已存在（历史运行生成）")
+                entry.pop("error", None)
+                entry.setdefault("summary", "产物已存在（中断后补跑完成）")
+            else:
+                entry["status"] = "interrupted"
+                entry.setdefault("error", "执行中断（服务重启或进程退出）")
+        elif status is None and artifact_done:
+            entry["status"] = "done"
+            entry.setdefault("summary", "产物已存在（历史运行生成）")
         out[sid] = entry
     return out
 
