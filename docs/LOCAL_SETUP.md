@@ -606,6 +606,28 @@ ImportError: TorchCodec is required for save_with_torchcodec.
 # 装到别处时用 --node-dir 指定 ComfyUI-LatentSyncWrapper 目录
 ```
 
+第三个是 `deploy/comfyui/patch_latentsync_vae_offline.py`，治"断网卡死"：
+日志里反复出现
+
+```
+'[Errno 101] Network is unreachable' thrown while requesting HEAD
+  https://huggingface.co/stable-diffusion-v1-5/stable-diffusion-v1-5/resolve/main/vae/config.json
+```
+
+而 `sync_lips` 阶段再也不往下走（不报错、不超时，就是卡住）。原因是上游
+`scripts/inference.py` 会优先对裸 `.safetensors`（`checkpoints/vae/` 里那个软链）
+调 `AutoencoderKL.from_single_file()`；只给权重、不给架构信息时，diffusers 只能
+按 sd-v1-5 去 Hub 取 `vae/config.json`，重试 5 次（1/2/4/8/8 秒）后**挂住不抛异常**，
+所以后面那个正确的 diffusers 目录候选永远轮不到。补丁插入 `load_local_vae()`：
+先试本地 `checkpoints/vae/`（`from_pretrained(..., local_files_only=True)`），
+再退到裸权重 + 本地 `config.json`，最差用 SD1.5 默认配置现搭一个——
+**任何路径都不联网**。同样幂等、自动备份、写完做语法检查：
+
+```bash
+/root/miniconda3/bin/python3 deploy/comfyui/patch_latentsync_vae_offline.py
+# 打完后必须重启 ComfyUI，否则跑的还是内存里的旧模块
+```
+
 #### 2）先摸清云机环境（每条都别跳过）
 
 ```bash
