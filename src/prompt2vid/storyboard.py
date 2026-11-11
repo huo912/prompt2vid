@@ -50,6 +50,9 @@ SPEECH_TAIL_SECONDS = 0.4
 
 # 旁白行的发言人 id（角色 id 从 1 开始，0 专门表示旁白/画外音）
 NARRATOR_ID = 0
+
+# 交给 TTS 的情感提示词长度上限（IndexTTS 情感节点吃短提示，太长会被稀释）
+MAX_TTS_EMOTION_CHARS = 120
 # 发言人写这些字样时按旁白处理
 NARRATOR_ALIASES = {
     "", "旁白", "旁白/画外音", "画外音", "解说", "叙述",
@@ -78,6 +81,11 @@ class Character:
     # 留空时由 tts 按角色 id 在默认音色表里轮转分配，保证不同角色不同声线。
     voice: str = ""
     timbre: str = ""
+    # 口吻（可选，中文）：这个角色天生的说话方式——方言、参照人物、口头禅、
+    # 语速节奏。它是台词情感的底子，会和每句的 emotion 拼在一起交给 TTS，
+    # 所以写一次「东北农村老大爷，慢条斯理、拉长音、蔫儿坏」就能让该角色
+    # 所有台词都带这个味儿，不用逐句重复。
+    delivery: str = ""
 
 
 @dataclass
@@ -86,7 +94,8 @@ class Line:
 
     speaker 是角色 id，0 表示旁白；name 是角色的中文名（写字幕前缀用）。
     emotion 是该句的情感描述（中文短语，如「好奇地打量，语调带笑意」），
-    给 IndexTTS-2.5 情感节点用；空串时读全局 PROMPT2VID_TTS_EMOTION。
+    给 IndexTTS-2.5 情感节点用；空串时继承角色卡的 delivery，再空就读全局
+    PROMPT2VID_TTS_EMOTION。
     """
 
     speaker: int
@@ -129,6 +138,26 @@ class Shot:
         if self.narration:
             return [Line(speaker=NARRATOR_ID, text=self.narration)]
         return []
+
+
+def line_emotion(line: Line, characters: dict[int, Character]) -> str:
+    """该句最终送给 TTS 的情感描述 = 角色口吻 + 本句情绪。
+
+    配音「像读课文」的根因通常不是音色，而是整片只有一句笼统的全局情感。
+    角色卡写 delivery（这个人的说话习惯），分镜写 emotion（这一句的情绪），
+    两者拼起来才是「谁、用什么口吻、正在怎么说话」。任一侧为空都不影响。
+    """
+    character = characters.get(line.speaker)
+    delivery = (character.delivery if character else "").strip()
+    emotion = line.emotion.strip()
+    parts: list[str] = []
+    for part in (delivery, emotion):
+        if part and part not in parts:
+            parts.append(part)
+    if not parts:
+        return ""
+    # IndexTTS 的情感提示是短提示词，过长会被稀释；超长时保底截断。
+    return "；".join(parts)[:MAX_TTS_EMOTION_CHARS]
 
 
 def estimate_speech_seconds(lines: list[Line] | None, narration: str = "") -> float:
@@ -238,6 +267,15 @@ def _normalize_characters(raw: object) -> dict[int, Character]:
             description=description,
             voice=str(item.get("voice") or "").strip(),
             timbre=str(item.get("timbre") or "").strip(),
+            # 口吻字段名允许 LLM 自由发挥，取第一个非空的即可
+            delivery=next(
+                (
+                    str(item.get(key)).strip()
+                    for key in ("delivery", "persona", "voice_style", "tone", "speech_style")
+                    if str(item.get(key) or "").strip()
+                ),
+                "",
+            ),
         )
     return characters
 

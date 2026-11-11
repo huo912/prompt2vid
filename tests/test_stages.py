@@ -589,12 +589,82 @@ def test_generate_voiceovers_dialogue_per_character(tmp_path, monkeypatch):
     assert "lines" not in manifest["shots"][1]
 
 
+def test_generate_voiceovers_dialogue_emotion_merges_character_delivery(
+    tmp_path, monkeypatch
+):
+    """逐句情感 = 角色口吻（delivery）+ 本句 emotion，并写进 manifest。"""
+    storyboard = json.loads(json.dumps(DIALOGUE_STORYBOARD, ensure_ascii=False))
+    storyboard["characters"][0]["delivery"] = "东北老大爷，拉长音，蔫儿坏"
+    storyboard["shots"][0]["dialogue"][0]["emotion"] = "阴阳怪气地损人"
+    storyboard["shots"] = storyboard["shots"][:1]
+    ws = _setup_workspace(tmp_path, monkeypatch, storyboard=storyboard)
+    monkeypatch.setattr(stages.tts, "available_timbres", lambda: [])
+
+    emotions: list[str] = []
+
+    def fake_tts(text, dest, **kwargs):
+        emotions.append(kwargs.get("emotion", ""))
+        dest = Path(dest)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(b"mp3-fake")
+        return dest
+
+    monkeypatch.setattr(stages.tts, "synthesize_audio", fake_tts)
+    monkeypatch.setattr(
+        stages.ffmpeg_ops, "concat_audio",
+        lambda items, dest, **kw: (Path(dest).write_bytes(b"x"), Path(dest))[1],
+    )
+    monkeypatch.setattr(stages.ffmpeg_ops, "audio_duration", lambda path: 1.0)
+
+    stages.generate_voiceovers()
+
+    assert emotions[0] == "东北老大爷，拉长音，蔫儿坏；阴阳怪气地损人"
+    # 老者没有口吻也没有逐句情绪 → 空串（交给全局 PROMPT2VID_TTS_EMOTION）
+    assert emotions[1] == ""
+
+    manifest = json.loads((ws / "audio" / "manifest.json").read_text(encoding="utf-8"))
+    first = manifest["shots"][0]
+    assert first["lines"][0]["emotion"] == "东北老大爷，拉长音，蔫儿坏；阴阳怪气地损人"
+
+
+def test_generate_voiceovers_unknown_timbre_falls_back(tmp_path, monkeypatch):
+    """分镜写了服务器上没有的音色 → 退回按角色 id 轮转，不静默换引擎。"""
+    storyboard = json.loads(json.dumps(DIALOGUE_STORYBOARD, ensure_ascii=False))
+    storyboard["characters"][0]["timbre"] = "不存在的音色.mp3"
+    storyboard["shots"] = storyboard["shots"][:1]
+    _setup_workspace(tmp_path, monkeypatch, storyboard=storyboard)
+    monkeypatch.setattr(stages.tts, "available_timbres", lambda: ["北京大爷.mp3"])
+
+    timbres: list[str] = []
+
+    def fake_tts(text, dest, **kwargs):
+        timbres.append(kwargs.get("timbre", ""))
+        dest = Path(dest)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(b"mp3-fake")
+        return dest
+
+    monkeypatch.setattr(stages.tts, "synthesize_audio", fake_tts)
+    monkeypatch.setattr(
+        stages.ffmpeg_ops, "concat_audio",
+        lambda items, dest, **kw: (Path(dest).write_bytes(b"x"), Path(dest))[1],
+    )
+    monkeypatch.setattr(stages.ffmpeg_ops, "audio_duration", lambda path: 1.0)
+
+    stages.generate_voiceovers()
+
+    assert timbres[0] == stages.tts.timbre_for_speaker(1)
+    assert "不存在的音色.mp3" not in timbres
+
+
 def test_generate_voiceovers_dialogue_character_timbre(tmp_path, monkeypatch):
     """角色卡写了 timbre 时逐句传给 TTS（IndexTTS 各角色不同音库）。"""
     storyboard = json.loads(json.dumps(DIALOGUE_STORYBOARD, ensure_ascii=False))
     storyboard["characters"][0]["timbre"] = "播音中年男.mp3"
     storyboard["shots"] = storyboard["shots"][:1]
     _setup_workspace(tmp_path, monkeypatch, storyboard=storyboard)
+    # 音色清单探测会打 ComfyUI；测试里钉住「清单拿不到」这条路径
+    monkeypatch.setattr(stages.tts, "available_timbres", lambda: [])
 
     timbres: list[str] = []
 

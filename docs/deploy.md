@@ -384,18 +384,18 @@ prompt2vid --check-only
 
 ### 8.10 常见问题
 
-| 症状                                            | 原因与处理                                                                                                                                |
-| ----------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
-| ComfyUI 启动即 `no kernel image is available`   | torch 是 cu124 及更早——回 8.5 第 2 步装 cu128 版                                                                                          |
-| 无卡模式下 `nvidia-smi` 报错                    | 正常，无卡模式本来就没有 GPU；装环境不受影响                                                                                              |
-| `git clone` GitHub 超时                         | 先 `source /etc/network_turbo`；仍不行用镜像 `git clone https://ghproxy.net/https://github.com/...`                                       |
-| 本地打不开 127.0.0.1:8188                       | 隧道没建或断了：重跑 8.8 的 ssh -N 命令；确认云机 ComfyUI 进程活着（`tail comfyui.log`）                                                  |
-| `--check-only` 报模型不存在                     | 模型没下全或目录放错——对照 §一 总表 / §7.4 验证输出                                                                                       |
-| SaveWEBM 节点报错                               | 没装 `pip install av`（8.5 第 4 步）                                                                                                      |
-| LatentSync 报 `TorchCodec is required`          | torchaudio≥2.9 的 `save()`/`load()` 默认走 TorchCodec——云机跑 `deploy/comfyui/patch_latentsync_audio.py` 打补丁后重启（LOCAL_SETUP §8.3） |
+| 症状                                            | 原因与处理                                                                                                                                                                                                                 |
+| ----------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| ComfyUI 启动即 `no kernel image is available`   | torch 是 cu124 及更早——回 8.5 第 2 步装 cu128 版                                                                                                                                                                           |
+| 无卡模式下 `nvidia-smi` 报错                    | 正常，无卡模式本来就没有 GPU；装环境不受影响                                                                                                                                                                               |
+| `git clone` GitHub 超时                         | 先 `source /etc/network_turbo`；仍不行用镜像 `git clone https://ghproxy.net/https://github.com/...`                                                                                                                        |
+| 本地打不开 127.0.0.1:8188                       | 隧道没建或断了：重跑 8.8 的 ssh -N 命令；确认云机 ComfyUI 进程活着（`tail comfyui.log`）                                                                                                                                   |
+| `--check-only` 报模型不存在                     | 模型没下全或目录放错——对照 §一 总表 / §7.4 验证输出                                                                                                                                                                        |
+| SaveWEBM 节点报错                               | 没装 `pip install av`（8.5 第 4 步）                                                                                                                                                                                       |
+| LatentSync 报 `TorchCodec is required`          | torchaudio≥2.9 的 `save()`/`load()` 默认走 TorchCodec——云机跑 `deploy/comfyui/patch_latentsync_audio.py` 打补丁后重启（LOCAL_SETUP §8.3）                                                                                  |
 | LatentSync 报 `RuntimeError: Face not detected` | 逐帧 insightface 检测失败（单帧人脸 <50×80 像素 / 置信度 <0.5 / 长宽比出 0.2–1.5，或侧脸、糊、遮挡）。跑 `deploy/comfyui/patch_latentsync_face_detect.py` 打补丁：改成先用最近的有效帧补洞，只有整段视频一帧都检不到才报错 |
-| 云机 `python3: command not found`（退出码 127） | 非交互 SSH 不读 `.bashrc`，conda 不在 PATH——用绝对路径 `/root/miniconda3/bin/python3`                                                     |
-| 断开 SSH 后 ComfyUI 停了                        | 没用 nohup/tmux——按 8.7 第 4 步的命令启动                                                                                                 |
+| 云机 `python3: command not found`（退出码 127） | 非交互 SSH 不读 `.bashrc`，conda 不在 PATH——用绝对路径 `/root/miniconda3/bin/python3`                                                                                                                                      |
+| 断开 SSH 后 ComfyUI 停了                        | 没用 nohup/tmux——按 8.7 第 4 步的命令启动                                                                                                                                                                                  |
 
 ### 8.11 seetacloud 实例（SSH 隧道）专用配置
 
@@ -629,6 +629,6 @@ prompt2vid-server --env-file 4090-low
 天庭基建部部长听完，当场就跪了，痛哭流涕：“玉帝啊，咱们天庭太落后了！咱们那蟠桃园的路，一万年才修一次，导致大量天兵天将闲置，原来症结在这儿啊！咱们应该把南天门拆了重修，修完再拆，以此以此保障天界GDP稳步增长！”
 玉帝听完汇报，沉默良久，最后长叹一声：“传朕旨意，以后凡间‘施工’二字，改名为‘养人’。另外，把二郎神的哮天犬调来沈阳，专门负责闻哪儿没挖开，就在那儿下嘴刨，以此以此解决天庭失业问题。”
 
-要求玉帝角色，和蔼可亲；哮天犬角色，调皮可爱；沈阳基建，奸诈狡猾，唯利是图。
+要求玉帝角色，赵本山口吻；哮天犬角色，赵四口吻；沈阳基建，刘能口吻。配音要有感情，不要像读课文。尽量的搞笑，能把讽刺意味表达出来，并夸大。
 
 ssh -p 45335 root@connect.westb.seetacloud.com / 3HZNY0yoLxDB

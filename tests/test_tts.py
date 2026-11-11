@@ -240,6 +240,29 @@ def test_timbre_for_speaker_defaults_empty(monkeypatch):
     assert tts.timbre_for_speaker(0) == ""
 
 
+def test_resolve_timbre_matches_catalogue(monkeypatch):
+    """分镜写的音色名按精确/忽略大小写/忽略扩展名三级匹配到真实文件名。"""
+    catalogue = ["北京大爷.mp3", "说书人.WAV", "甜美女声.mp3"]
+    monkeypatch.setattr(tts, "available_timbres", lambda: list(catalogue))
+    assert tts.resolve_timbre("北京大爷.mp3") == "北京大爷.mp3"
+    # 音色包里 .WAV/.wav/.MP3 混用，LLM 抄成小写也要认
+    assert tts.resolve_timbre("说书人.wav") == "说书人.WAV"
+    # 扩展名写错但主干对得上
+    assert tts.resolve_timbre("甜美女声.wav") == "甜美女声.mp3"
+    # 服务器上确实没有 → 空串（调用方退回轮转）
+    assert tts.resolve_timbre("不存在的音色.mp3") == ""
+    assert tts.resolve_timbre("") == ""
+    # 清单里的坑：静音占位与朗读小说腔一律拒绝
+    assert tts.resolve_timbre("无音频文件") == ""
+    assert tts.resolve_timbre("抖音-读小说.wav") == ""
+
+
+def test_resolve_timbre_without_catalogue_keeps_name(monkeypatch):
+    """探测不到音色清单时不拦路，交给 TTS 自己回退。"""
+    monkeypatch.setattr(tts, "available_timbres", lambda: [])
+    assert tts.resolve_timbre("帝王音.mp3") == "帝王音.mp3"
+
+
 def test_synthesize_audio_passes_timbre_to_comfyui(monkeypatch, tmp_path):
     """台词行的角色 timbre 会写进 IndexTTS 的 TimbreAudioLoader。"""
     fake = FakeComfyTTSClient()

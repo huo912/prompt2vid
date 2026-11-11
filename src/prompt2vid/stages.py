@@ -46,6 +46,7 @@ from .storyboard import (
     Shot,
     StoryboardError,
     extract_json,
+    line_emotion,
     load_characters,
     load_storyboard,
     read_manifest,
@@ -508,9 +509,15 @@ def _line_voice(character: Character | None, speaker: int) -> tuple[str, str]:
 
     角色卡显式写了就用卡上的；没写则按角色 id 在默认声线表里轮转，
     保证同一部片子里不同角色不是同一个嗓子。旁白保持全局音色。
+    角色卡写的 timbre 会先校验服务器上是否真有这个文件——分镜师凭空
+    编一个名字很常见，编错就退回轮转，避免整句降级换引擎。
     """
     voice = character.voice if character and character.voice else tts.voice_for_speaker(speaker)
-    timbre = character.timbre if character and character.timbre else tts.timbre_for_speaker(speaker)
+    timbre = ""
+    if character and character.timbre:
+        timbre = tts.resolve_timbre(character.timbre)
+    if not timbre:
+        timbre = tts.timbre_for_speaker(speaker)
     return voice, timbre
 
 
@@ -527,7 +534,7 @@ def _voiceover_dialogue(
             voice, timbre = _line_voice(characters.get(line.speaker), line.speaker)
             tts.synthesize_audio(
                 text=line.text, dest=dest, voice=voice, timbre=timbre,
-                emotion=line.emotion,
+                emotion=line_emotion(line, characters),
             )
             rebuilt = True
         line_paths.append(dest)
@@ -544,6 +551,7 @@ def _voiceover_dialogue(
             "speaker": line.speaker,
             "name": line.name,
             "text": line.text,
+            "emotion": line_emotion(line, characters),
             "path": f"{AUDIO_DIR}/{path.name}",
             "seconds": round(seconds, 3),
             "start": round(cursor, 3),

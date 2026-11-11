@@ -124,17 +124,59 @@
 
 | 变量 | 默认 | 说明 |
 |------|------|------|
-| `PROMPT2VID_TTS_TIMBRE` | 甜美女声.mp3 | 插件自带音色（TimbreModel 目录共 59 个：新闻女声/说书人/御姐配音/温润男声/播音中年男/花甲奶奶…）；完整列表看 ComfyUI 节点下拉框 |
+| `PROMPT2VID_TTS_TIMBRE` | 甜美女声.mp3 | 插件自带音色（TimbreModel 目录共 59 个文件，节点下拉框里通常 39 个可选项：北京大爷/花甲奶奶/热心大婶/徐志胜/御姐配音/温润男声/播音中年男…）；完整列表看 ComfyUI 节点下拉框，或跑 `tts.available_timbres()` |
 | `PROMPT2VID_TTS_TIMBRES` | 空 | 角色音色表（逗号分隔，按角色 id 顺序）；空则按角色 id 轮转内置表，不同角色自动不同嗓子 |
 | `PROMPT2VID_TTS_REF_AUDIO` | 空 | 指向 3-15 秒干净人声（wav/mp3）时**克隆该音色**，优先于 timbre |
 | `PROMPT2VID_TTS_SPEED` | 1.0 | 语速（>1 变慢，<1 变快） |
 | `PROMPT2VID_TTS_SILENCE_MS` | 200 | 句间停顿毫秒：长句旁白的自然换气感，嫌拖沓可降到 100 |
-| `PROMPT2VID_TTS_EMOTION` | 自然口语化… | **全局情感基调**（EmotionTextNode）：避免「读课文感」的第一杠杆。台词逐句写 `emotion` 短语时按句覆盖（如「哭着说」「得意悠闲」）；空串整体关闭 |
-| `PROMPT2VID_TTS_EMOTION_WEIGHT` | 0.6 | 情感权重：0-1，越大语气越浓 |
+| `PROMPT2VID_TTS_EMOTION` | 自然口语化… | **全局情感基调**（EmotionTextNode）：避免「读课文感」的兜底。台词逐句写 `emotion`、角色卡写 `delivery` 时按句覆盖（两者拼起来送进 TTS）；空串整体关闭 |
+| `PROMPT2VID_TTS_EMOTION_WEIGHT` | 0.6 | 情感权重：0-1，越大语气越浓。要「乡村爱情」那种夸张喜剧感，调 0.8 |
 | `PROMPT2VID_TTS_KEEP_CACHED` | true | 模型留显存逐镜免重载；低显存与其它阶段抢卡时设 false |
 
 > 采样说明：工作流固定 `num_beams=1`（关束搜索）+ 随机采样——束搜索
-> 输出偏「播音腔」，是读课文感的主要来源；无需手动调。
+> 输出偏「播音腔」，是读课文感的主要来源；无需手动调。但**只关束搜索
+> 不够**：如果没有逐句情感和角色口吻，IndexTTS 仍然会用一条平铺的调子
+> 念完所有台词，听起来还是读课文。见下节。
+
+### 配音不像读课文（乡村爱情式口吻）
+
+读课文感有三个来源，按影响从大到小：
+
+1. **台词不像人话**。书面语、成语堆砌、排比句、每句都完整主谓宾，
+   什么嗓音念都是稿子。`config/tasks/write_script.yaml` 已要求口语化、
+   短句、东北方言词、打断/反问/损人，并且禁止新闻稿腔。
+2. **所有人一个调子**。分镜的角色卡现在必须写 `delivery`（口吻：方言 +
+   参照人物 + 口头禅 + 语速节奏），代码用 `storyboard.line_emotion()`
+   把它和每句的 `emotion` 拼成一条描述（去重、截断到 120 字）送进
+   IndexTTS 的 `emotion_description`：
+
+   ```json
+   {
+     "id": 1,
+     "name": "玉帝",
+     "timbre": "北京大爷.mp3",
+     "delivery": "东北农村老大爷，赵本山式慢条斯理、拉长音、蔫儿坏，爱反问",
+     "dialogue": [
+       { "speaker": 1, "text": "哎呀，这路修得，比我当年修南天门还勤快！",
+         "emotion": "阴阳怪气地损人，尾音上扬" }
+     ]
+   }
+   ```
+
+   实际送进 TTS 的是
+   `东北农村老大爷，赵本山式慢条斯理、拉长音、蔫儿坏，爱反问；阴阳怪气地损人，尾音上扬`。
+   `emotion` 写「正常说」「平淡地说」等于没写，分镜提示词里已明令禁止。
+3. **音色选错**。老头配甜美女声一开口就出戏。分镜提示词里给了可用音色
+   清单，`tts.resolve_timbre()` 还会拿 ComfyUI 的真实下拉清单校验一次
+   （精确 → 忽略大小写 → 忽略扩展名），编错的名字退回按角色轮转，避免
+   整句降级到 edge-tts 导致同一个角色声音突变。
+
+> ⚠ 音色清单里有两个坑，`tts.BLOCKED_TIMBRES` 已硬拦：
+> `无音频文件`（静音占位，选它整片没声）和 `抖音-读小说.wav`
+> （正是朗读小说腔）。
+
+> ⚠ `PROMPT2VID_TTS_EMOTION_WEIGHT` 别只靠全局值。0.6 是「有点情绪」，
+> 喜剧要 0.8；再往上（0.9+）容易把字咬糊。
 
 ### 角色对白（让人物真的开口）
 
@@ -281,7 +323,7 @@ curl -L -o models/tts/zh_CN-huayan-medium.onnx.json \
 
 | 症状 | 原因 | 处理 |
 |------|------|------|
-| 配音像读课文 | 采样用束搜索 + 无情感控制 | 已默认关束搜索 + EmotionTextNode 全局基调；台词逐句写 `emotion` 短语按句调语气 |
+| 配音像读课文 | ① 台词是书面语 ② 所有角色共用一个调子（没有逐句情感/口吻） ③ 音色与人设不符 | ① `write_script.yaml` 已要求口语化短句、东北方言词、禁新闻稿腔 ② 关束搜索 + 角色卡 `delivery` × 台词 `emotion` 拼成 `emotion_description`（`storyboard.line_emotion()`），`PROMPT2VID_TTS_EMOTION_WEIGHT` 调到 0.8 ③ `tts.resolve_timbre()` 按 ComfyUI 真实清单校验，`无音频文件`/`抖音-读小说.wav` 硬拦（详见 §配音不像读课文） |
 | 每镜结尾卡一下再切 | 过渡垫片是定格末帧 | 过渡垫片已独立为 `freeze_seconds`（只定格、不参与配音补长）；配音超长补长的垫片默认 `PROMPT2VID_PAD_MODE=slow`（先降速再定格），避免倒放 |
 | 口型和音频对不上 | ① 旧默认 `pingpong` 会倒放末段，嘴型倒退 ② 渲染阶段二次提速配音（唇形按原速、语音被快放）③ 分镜时长没覆盖台词 ④ 未装口型同步节点 | ① 已默认 `slow` 垫片（画面始终正向，`PROMPT2VID_PAD_MODE`）；口型同步阶段改用本地补帧 + 节点 `normal` 裁齐 ② 同步阶段用 `_audio_fit_plan` 先定好配音，渲染沿用同一份（`PROMPT2VID_AUDIO_SPEEDUP_MAX`，默认 1.2）③ 分镜时长自动按台词估算抬高 ④ 装 LatentSync（见 [LOCAL_SETUP.md §8](LOCAL_SETUP.md)），动漫/侧脸镜头不适用 |
 | 人物某个部位变形/鬼影 | 补帧 minterpolate 在脸、手指、衣摆上插出伪影 | 默认关闭 `PROMPT2VID_SMOOTH_FPS`；只在纯风景/固定机位时开 |

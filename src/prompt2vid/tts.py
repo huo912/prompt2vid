@@ -66,6 +66,9 @@ DEFAULT_CHARACTER_TIMBRES = (
     "随性男青.mp3",         # 男声（随性青年）
     "温柔学姐.mp3",         # 女声（温柔学姐）
 )
+# 音色清单里的「陷阱选项」：前者是静音占位（选它整片没声），后者是朗读小说
+# 腔（正是「配音像读课文」的来源）。分镜师偶尔会按字面意思挑中它们。
+BLOCKED_TIMBRES = frozenset({"无音频文件", "抖音-读小说.wav"})
 # 静音占位：8kHz 单声道 1 秒的极小 MP3 帧
 _SILENT_MP3 = (
     b"\xff\xfb\x90\x00" + b"\x00" * 413
@@ -79,14 +82,18 @@ ENGINE_ORDER = ("comfyui", "edge", "gateway", "piper")
 _COMFYUI_TTS_OK: bool | None = None
 # 情感节点（IndexTTS25EmotionTextNode）探测缓存，语义同上
 _EMOTION_NODE_OK: bool | None = None
+# ComfyUI 侧音色文件名清单缓存（None = 未探测）；用于校验分镜里写的 timbre
+_TIMBRES: list[str] | None = None
 
 
 def reset_engine_cache() -> None:
     """清空引擎可用性缓存（测试切换环境变量后调用）。"""
     global _COMFYUI_TTS_OK
     global _EMOTION_NODE_OK
+    global _TIMBRES
     _COMFYUI_TTS_OK = None
     _EMOTION_NODE_OK = None
+    _TIMBRES = None
 
 
 def _engine_list() -> list[str]:
@@ -138,6 +145,54 @@ def timbre_for_speaker(speaker_id: int) -> str:
         return ""
     palette = _env_list("PROMPT2VID_TTS_TIMBRES") or list(DEFAULT_CHARACTER_TIMBRES)
     return palette[(speaker_id - 1) % len(palette)]
+
+
+def available_timbres() -> list[str]:
+    """ComfyUI 侧 TimbreModel 目录里的音色文件名（探测失败返回 []）。
+
+    分镜师的模型并不知道服务器上到底有哪些音色，很容易编出一个不存在的
+    文件名；拿这个清单校验一次，编错的名字就退回按角色轮转，而不是让
+    整句配音因为节点报错而降级到别的引擎（那会导致同一角色声音突变）。
+    """
+    global _TIMBRES
+    if _TIMBRES is not None:
+        return list(_TIMBRES)
+    _TIMBRES = []
+    try:
+        from .comfyui_client import ComfyUIClient, combo_values
+
+        with ComfyUIClient() as client:
+            _TIMBRES = combo_values(client.node_spec("TimbreAudioLoader"), "audio_file")
+    except Exception as exc:  # noqa: BLE001 - ComfyUI 不可达按无清单处理
+        logger.debug("探测 ComfyUI 音色清单失败: %s", exc)
+    return list(_TIMBRES)
+
+
+def resolve_timbre(name: str) -> str:
+    """把分镜里写的音色名解析成服务器上真实存在的文件名。
+
+    精确命中优先，其次忽略大小写与扩展名比较（音色包里 .WAV/.wav/.MP3
+    混用，LLM 抄名字经常抄成小写）。清单拿不到或确实没有返回空串，
+    由调用方退回轮转音色。
+    """
+    name = (name or "").strip()
+    if not name or name in BLOCKED_TIMBRES:
+        return ""
+    catalogue = available_timbres()
+    if not catalogue:
+        return name  # 探测失败时不拦，交给 TTS 自己回退
+    if name in catalogue:
+        return name
+    lowered = name.lower()
+    for item in catalogue:
+        if item.lower() == lowered:
+            return item
+    stem = Path(lowered).stem
+    for item in catalogue:
+        if Path(item.lower()).stem == stem:
+            return item
+    logger.warning("分镜指定的音色 %s 不在 ComfyUI 音色清单里，按角色轮转", name)
+    return ""
 
 
 def _comfyui_tts_available() -> bool:

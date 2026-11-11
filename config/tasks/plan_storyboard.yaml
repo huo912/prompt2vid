@@ -11,7 +11,9 @@ plan_storyboard:
           "id": 1,
           "name": "角色中文名",
           "description": "英文角色外观描述：发型发色、脸型肤色、年龄体型、服装款式颜色、标志性配饰，一段固定英文，所有分镜共用",
-          "voice": "该角色的音色，可选：zh-CN-YunxiNeural / zh-CN-XiaoyiNeural / zh-CN-YunjianNeural / zh-CN-XiaochenNeural 之一（不同角色必须选不同的，留空则由代码分配）"
+          "voice": "该角色的音色，可选：zh-CN-YunxiNeural / zh-CN-XiaoyiNeural / zh-CN-YunjianNeural / zh-CN-XiaochenNeural 之一（不同角色必须选不同的，留空则由代码分配）",
+          "timbre": "（可选）该角色在 IndexTTS 里的音库文件名，只能从下面清单里逐字复制（含扩展名，大小写也要对），不同角色必须不同；拿不准就留空（代码按角色 id 轮转）。清单：北京大爷.mp3（北方老大爷，慢条斯理、蔫儿坏、爱损人）/ 花甲奶奶.mp3（老太太，念叨、拉长音）/ 热心大婶.mp3（大嗓门、爱管闲事）/ 徐志胜.wav（带口音的自嘲式搞笑，东北味最足）/ 率真小老弟.mp3（年轻男，直愣愣、一惊一乍）/ 随性男青.mp3 / 不羁青年.mp3 / 南方小哥.mp3 / 憨憨萌兽.mp3 / 播音中年男.mp3 / 电台男主播.mp3 / 罗振宇老师.wav / 沉稳高管.mp3 / 温润男声.mp3 / 温润青年.mp3 / 清澈弟弟.mp3 / 钟离.wav（低沉威严，适合帝王/权威）/ 御姐配音.wav / 傲娇御姐.mp3 / 阅历姐姐.mp3 / 港普空姐.mp3 / 温暖少女.mp3 / 温暖闺蜜.mp3 / 温柔学姐.mp3 / 甜美女声.mp3 / 软糯女孩.mp3 / 嚣张小妞.mp3 / 林黛玉.wav（柔弱哭腔，可反串搞笑）",
+          "delivery": "该角色的口吻（中文，必填）：方言 + 参照人物 + 口头禅 + 语速节奏，如「东北农村老大爷，赵本山式慢条斯理、拉长音、蔫儿坏，爱反问」"
         }
       ],
       "shots": [
@@ -19,8 +21,8 @@ plan_storyboard:
           "id": 1,
           "characters": [1],
           "dialogue": [
-            {"speaker": 1, "text": "本镜该角色说出的台词（中文，口语化，短句）"},
-            {"speaker": "旁白", "text": "（可选）本镜旁白"}
+            {"speaker": 1, "text": "本镜该角色说出的台词（中文，口语化，短句）", "emotion": "这一句的情绪与说法（中文，必填）：如「阴阳怪气地损人，故意拖长音，尾音上扬」"},
+            {"speaker": "旁白", "text": "（可选）本镜旁白", "emotion": "（可选）旁白的说法，如「像说书人一样卖关子」"}
           ],
           "narration": "本镜旁白（中文；有 dialogue 时可留空）",
           "visual": "画面描述（中文）",
@@ -45,15 +47,29 @@ plan_storyboard:
        不同角色必须指定不同的 voice（同一部片子里两个人不能是同一个嗓子）；
     1b. 口播是硬性要求：人物出镜且剧本里有台词的镜头，**必须**用 dialogue 写出
        台词，否则成片只有旁白、人物嘴不动。规则：
-       - dialogue 是有序数组，每项 {"speaker": 角色id 或 "旁白", "text": "中文台词"}；
+       - dialogue 是有序数组，每项 {"speaker": 角色id 或 "旁白", "text":
+         "中文台词", "emotion": "这一句的说法"}；
        - speaker 只写 characters 里已定义的 id，或写 "旁白"；不要编造角色名；
        - 一镜 1-3 句，单句 6-18 字（单镜 3-5 秒，语速约 5 字/秒）；
        - 对白优先、旁白次之：有人物说话就写 dialogue，不要把人话改写成旁白；
        - 纯空镜/转场镜可以只写 narration（无 dialogue），此时按旁白配音；
     1c. 该镜里说话的角色必须在该镜 characters 里（否则人物不在画面却听到声音）；
-    1d. 镜内说话角色的 motion_prompt 必须包含口部动作描述，如
+    1d. 每句台词必须带 emotion（这一句怎么说话：语气、情绪、节奏、重音、
+       尾音），**禁止**写「正常说」「平淡地说」「朗读」这类没有信息量的词；
+       允许夸张、讽刺、阴阳怪气、突然拔高、倒吸凉气等具体表演提示——
+       配音「像读课文」的全部原因就是没有这一栏；
+    1e. 每个有台词的角色必须写 delivery（这个人的口吻：方言 + 参照人物 +
+       口头禅 + 语速节奏），它是该角色所有台词的情感底子，代码会把它和
+       每句的 emotion 拼起来送进 TTS；没有 delivery，多个角色会听起来像
+       同一个人在念同一份稿子；
+    1f. 镜内说话角色的 motion_prompt 必须包含口部动作描述，如
        "the character is speaking, lips moving naturally, subtle head motion"
        （不说这句，LTX 会生成一张不动的脸，后续口型同步没有可对齐的目标）；
+    1g. timbre / voice 必须跟人设对得上（老头用北京大爷.mp3 或花甲奶奶.mp3，
+       泼辣角色用嚣张小妞.mp3；凶悍的男性角色不要配软糯女孩.mp3）；宁可留空
+       让代码按 id 轮转，也不要写出和性别年龄相反的声线——角色一开口就出戏；
+       严禁选「无音频文件」「抖音-读小说.wav」——前者是无声占位，后者正是
+       播音腔读小说的来源，选它等于把配音拉回「读课文」；
     2. 每镜的 characters 字段列出该镜出场的角色 id（空镜写 [] 或不写）；
     3. image_prompt 必须逐字包含该镜全部出场角色的 description 原文
        （一字不改、按 id 顺序拼接），再叠加画面构图/光线/风格描述——
@@ -77,8 +93,10 @@ plan_storyboard:
         人物主体尽量保持姿态稳定。
   expected_output: >-
     一个 JSON 分镜表（已通过文件工具写入 storyboard.json）：characters 数组
-    每项含 id、name、description（固定英文外观描述）、voice；shots 数组每项含
-    id、characters（出场角色 id）、dialogue（台词行数组，有对白时必填）、
+    每项含 id、name、description（固定英文外观描述）、voice、timbre、
+    delivery（口吻）；shots 数组每项含
+    id、characters（出场角色 id）、dialogue（台词行数组，有对白时必填，
+    每行含 speaker/text/emotion）、
     narration、visual、image_prompt（逐字包含出场角色 description）、
     motion_prompt、duration_seconds，以及 total_duration_seconds。
   agent: storyboard_planner

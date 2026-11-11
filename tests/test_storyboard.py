@@ -368,6 +368,66 @@ def test_character_voice_and_timbre_parsed(tmp_path: Path):
     assert characters[1].timbre == "播音中年男.mp3"
 
 
+def test_character_delivery_parsed_with_aliases(tmp_path: Path):
+    """角色卡的口吻（delivery）支持常见别名，缺省为空串。"""
+    characters = [
+        {"id": 1, "name": "玉帝", "description": "an old emperor",
+         "delivery": "东北老大爷，赵本山式慢条斯理、蔫儿坏"},
+        {"id": 2, "name": "哮天犬", "description": "a dog spirit",
+         "persona": "赵四式一惊一乍"},
+        {"id": 3, "name": "旁白甲", "description": "a narrator", "voice_style": "刘能式絮叨"},
+        {"id": 4, "name": "路人", "description": "a passerby"},
+    ]
+    path = _write_with_characters(
+        tmp_path,
+        shots=[{"id": 1, "image_prompt": "palace", "duration_seconds": 4}],
+        characters=characters,
+    )
+    parsed = storyboard.load_characters(path)
+    assert parsed[1].delivery == "东北老大爷，赵本山式慢条斯理、蔫儿坏"
+    assert parsed[2].delivery == "赵四式一惊一乍"
+    assert parsed[3].delivery == "刘能式絮叨"
+    assert parsed[4].delivery == ""
+
+
+def test_line_emotion_merges_delivery_and_per_line():
+    """最终情感 = 角色口吻 + 本句情绪；两者都空才返回空串。"""
+    characters = {
+        1: storyboard.Character(
+            id=1, name="玉帝", description="emperor",
+            delivery="东北老大爷，拉长音，蔫儿坏",
+        )
+    }
+    assert storyboard.line_emotion(
+        storyboard.Line(speaker=1, text="哎", emotion="阴阳怪气地损人"), characters
+    ) == "东北老大爷，拉长音，蔫儿坏；阴阳怪气地损人"
+    # 只写口吻：整段台词都带这个味儿
+    assert storyboard.line_emotion(
+        storyboard.Line(speaker=1, text="哎"), characters
+    ) == "东北老大爷，拉长音，蔫儿坏"
+    # 口吻与本句重复时去重
+    assert storyboard.line_emotion(
+        storyboard.Line(speaker=1, text="哎", emotion="东北老大爷，拉长音，蔫儿坏"),
+        characters,
+    ) == "东北老大爷，拉长音，蔫儿坏"
+    # 旁白没有角色卡 → 只有本句情绪；都没有 → 空串（落回全局情感）
+    assert storyboard.line_emotion(
+        storyboard.Line(speaker=0, text="话说", emotion="像说书人一样卖关子"), characters
+    ) == "像说书人一样卖关子"
+    assert storyboard.line_emotion(storyboard.Line(speaker=0, text="话说"), characters) == ""
+
+
+def test_line_emotion_truncated_to_limit():
+    """情感提示词过长会截断（IndexTTS 情感提示是短提示词）。"""
+    characters = {
+        1: storyboard.Character(
+            id=1, name="甲", description="x", delivery="口吻" * 100,
+        )
+    }
+    merged = storyboard.line_emotion(storyboard.Line(speaker=1, text="哎"), characters)
+    assert len(merged) == storyboard.MAX_TTS_EMOTION_CHARS
+
+
 def test_dialogue_speaker_resolution(tmp_path: Path):
     """speaker 支持角色 id / 角色名 / 旁白。/ 未定义发言人降级为旁白。"""
     characters = [
